@@ -1,0 +1,7 @@
+__pycache__
+.DS_Store
+*.gz
+*.safetensors
+.venv
+model/*.json
+archive

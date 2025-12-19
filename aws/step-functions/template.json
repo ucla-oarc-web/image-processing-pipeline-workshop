@@ -1,0 +1,295 @@
+{
+  "Resources": {
+    "StateMachine84d8100b": {
+      "Type": "AWS::StepFunctions::StateMachine",
+      "Properties": {
+        "Definition": {
+          "Comment": "Process before/after images with SAM3 comparison",
+          "StartAt": "CheckInputFormat",
+          "States": {
+            "CheckInputFormat": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.detail.object.key",
+                  "StringMatches": "inputs/*.json",
+                  "Next": "ReadInputJSON"
+                },
+                {
+                  "And": [
+                    {
+                      "Variable": "$.detail.object.key",
+                      "StringMatches": "async-out/*"
+                    },
+                    {
+                      "Variable": "$.detail.object.key",
+                      "StringMatches": "*.out"
+                    }
+                  ],
+                  "Next": "ProcessImage"
+                }
+              ],
+              "Default": "Pass"
+            },
+            "ReadInputJSON": {
+              "Type": "Task",
+              "Parameters": {
+                "Bucket.$": "$.detail.bucket.name",
+                "Key.$": "$.detail.object.key"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+              "ResultPath": "$.s3Object",
+              "Next": "ParseInputJSON",
+              "ResultSelector": {
+                "Body.$": "$.Body",
+                "ParsedBody.$": "States.StringToJson($.Body)"
+              }
+            },
+            "ParseInputJSON": {
+              "Type": "Pass",
+              "Parameters": {
+                "bucket.$": "$.detail.bucket.name",
+                "before_image.$": "States.Format('s3://{}/images/{}', $.detail.bucket.name, $.s3Object.ParsedBody.before)",
+                "after_image.$": "States.Format('s3://{}/images/{}', $.detail.bucket.name, $.s3Object.ParsedBody.after)",
+                "compared_output.$": "States.Format('s3://{}/compared/{}', $.detail.bucket.name, $.s3Object.ParsedBody.compared_output)",
+                "text": "house, building, roof",
+                "payloadKey.$": "States.Format('payload/{}.json', States.UUID())"
+              },
+              "Next": "CreatePayload"
+            },
+            "CreatePayload": {
+              "Type": "Task",
+              "Parameters": {
+                "Body.$": "$",
+                "Bucket.$": "$.bucket",
+                "Key.$": "$.payloadKey",
+                "ContentType": "application/json"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+              "ResultPath": "$.payloadFile",
+              "Next": "CallSAM3"
+            },
+            "CallSAM3": {
+              "Type": "Task",
+              "Parameters": {
+                "EndpointName": "sam3-seg-endpoint",
+                "InputLocation.$": "States.Format('s3://{}/{}', $.bucket, $.payloadKey)",
+                "ContentType": "application/json"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:sagemakerruntime:invokeEndpointAsync",
+              "End": true
+            },
+            "ProcessImage": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${lambdainvoke_FunctionName_ebcdf327}",
+                "Payload": {
+                  "bucket.$": "$.detail.bucket.name",
+                  "key.$": "$.detail.object.key"
+                }
+              },
+              "End": true
+            },
+            "Pass": {
+              "Type": "Pass",
+              "End": true
+            }
+          }
+        },
+        "DefinitionSubstitutions": {
+          "lambdainvoke_FunctionName_ebcdf327": "arn:aws:lambda:us-west-2:123456789123:function:oarc-image-process"
+        },
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "Role56e1f1ec",
+            "Arn"
+          ]
+        },
+        "StateMachineName": "StateMachine84d8100b",
+        "StateMachineType": "STANDARD",
+        "EncryptionConfiguration": {
+          "Type": "AWS_OWNED_KEY"
+        },
+        "Tags": [
+          {
+            "Key": "client",
+            "Value": "oarc"
+          }
+        ],
+        "LoggingConfiguration": {
+          "Level": "ALL",
+          "IncludeExecutionData": false,
+          "Destinations": [
+            {
+              "CloudWatchLogsLogGroup": {
+                "LogGroupArn": {
+                  "Fn::GetAtt": [
+                    "LogGroup24e50d78",
+                    "Arn"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Role56e1f1ec": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "StepFunctions_IAM_ROLE_oarc-image-processing-pipeline5475de85",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "states.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "MaxSessionDuration": 3600
+      }
+    },
+    "Policy30f97b47": {
+      "Type": "AWS::IAM::RolePolicy",
+      "Properties": {
+        "PolicyName": "LambdaInvokeScopedAccessPolicy6ccdf804",
+        "RoleName": {
+          "Ref": "Role56e1f1ec"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "lambda:InvokeFunction"
+              ],
+              "Resource": [
+                "arn:aws:lambda:us-west-2:123456789123:function:oarc-image-process:*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "lambda:InvokeFunction"
+              ],
+              "Resource": [
+                "arn:aws:lambda:us-west-2:123456789123:function:oarc-image-process"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::oarc-image-processing-pipeline/*",
+                "arn:aws:s3:::oarc-image-processing-pipeline"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "sagemaker:InvokeEndpointAsync",
+                "sagemaker:InvokeEndpoint"
+              ],
+              "Resource": "arn:aws:sagemaker:us-west-2:123456789123:endpoint/sam3-seg-endpoint"
+            }
+          ]
+        }
+      }
+    },
+    "Policy75a7e54a": {
+      "Type": "AWS::IAM::RolePolicy",
+      "Properties": {
+        "PolicyName": "XRayAccessPolicy6d2db6a1",
+        "RoleName": {
+          "Ref": "Role56e1f1ec"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+                "xray:GetSamplingRules",
+                "xray:GetSamplingTargets"
+              ],
+              "Resource": [
+                "*"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "Policyf5545b44": {
+      "Type": "AWS::IAM::RolePolicy",
+      "Properties": {
+        "PolicyName": "BedrockInvokeModelScopedAccessForFoundationModelPolicy45124c49",
+        "RoleName": {
+          "Ref": "Role56e1f1ec"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Sid": "InvokeModel1",
+              "Action": [
+                "bedrock:InvokeModel"
+              ],
+              "Resource": [
+                "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "Policybb73bc55": {
+      "Type": "AWS::IAM::RolePolicy",
+      "Properties": {
+        "PolicyName": "CloudWatchLogsDeliveryFullAccessPolicy536f6673",
+        "RoleName": {
+          "Ref": "Role56e1f1ec"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogDelivery",
+                "logs:GetLogDelivery",
+                "logs:UpdateLogDelivery",
+                "logs:DeleteLogDelivery",
+                "logs:ListLogDeliveries",
+                "logs:PutResourcePolicy",
+                "logs:DescribeResourcePolicies",
+                "logs:DescribeLogGroups"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "LogGroup24e50d78": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/vendedlogs/states/StateMachine84d8100b-Logs"
+      }
+    }
+  }
+}

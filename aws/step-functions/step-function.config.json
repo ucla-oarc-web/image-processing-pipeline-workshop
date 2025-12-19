@@ -1,0 +1,106 @@
+{
+  "Comment": "Process before/after images with SAM3 comparison",
+  "StartAt": "CheckInputFormat",
+  "States": {
+    "CheckInputFormat": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.detail.object.key",
+          "StringMatches": "inputs/*.json",
+          "Next": "ReadInputJSON"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.detail.object.key",
+              "StringMatches": "async-out/*"
+            },
+            {
+              "Variable": "$.detail.object.key",
+              "StringMatches": "*.out"
+            }
+          ],
+          "Next": "ProcessImage"
+        }
+      ],
+      "Default": "Pass"
+    },
+    "ReadInputJSON": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket.$": "$.detail.bucket.name",
+        "Key.$": "$.detail.object.key"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "ResultPath": "$.s3Object",
+      "Next": "ParseInputJSON",
+      "ResultSelector": {
+        "Body.$": "$.Body",
+        "ParsedBody.$": "States.StringToJson($.Body)"
+      }
+    },
+    "ParseInputJSON": {
+      "Type": "Pass",
+      "Parameters": {
+        "bucket.$": "$.detail.bucket.name",
+        "originalKey.$": "$.detail.object.key",
+        "before_image.$": "States.Format('s3://{}/images/{}', $.detail.bucket.name, $.s3Object.ParsedBody.before)",
+        "after_image.$": "States.Format('s3://{}/images/{}', $.detail.bucket.name, $.s3Object.ParsedBody.after)",
+        "compared_output.$": "States.Format('s3://{}/compared/{}', $.detail.bucket.name, $.s3Object.ParsedBody.compared_output)",
+        "llm_output.$": "States.Format('s3://{}/llm-output/{}', $.detail.bucket.name, $.s3Object.ParsedBody.llm_output)",
+        "text": "house, building, roof",
+        "payloadKey.$": "States.Format('payload/{}.json', States.UUID())"
+      },
+      "Next": "CreatePayload"
+    },
+    "CreatePayload": {
+      "Type": "Task",
+      "Parameters": {
+        "Body.$": "$",
+        "Bucket.$": "$.bucket",
+        "Key.$": "$.payloadKey",
+        "ContentType": "application/json"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "ResultPath": "$.payloadFile",
+      "Next": "CallSAM3"
+    },
+    "CallSAM3": {
+      "Type": "Task",
+      "Parameters": {
+        "EndpointName": "sam3-seg-endpoint",
+        "InputLocation.$": "States.Format('s3://{}/{}', $.bucket, $.payloadKey)",
+        "ContentType": "application/json"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sagemakerruntime:invokeEndpointAsync",
+      "ResultPath": "$.sagemakerResult",
+      "Next": "DeleteObject"
+    },
+    "DeleteObject": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket.$": "$.bucket",
+        "Key.$": "$.originalKey"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:s3:deleteObject",
+      "End": true
+    },
+    "ProcessImage": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-west-2:123456789123:function:oarc-image-process",
+        "Payload": {
+          "bucket.$": "$.detail.bucket.name",
+          "key.$": "$.detail.object.key"
+        }
+      },
+      "End": true
+    },
+    "Pass": {
+      "Type": "Pass",
+      "End": true
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "CloudFormation template for EventBridge Ruleoarc-image-processing-pipeline",
+  "Resources": {
+    "Rule877b8134": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": "oarc-image-processing-pipeline",
+        "EventPattern": "{\"source\":[\"aws.s3\"],\"detail-type\":[\"Object Created\"],\"detail\":{\"object\":{\"key\":[{\"wildcard\":\"inputs/*.json\"},{\"wildcard\":\"async-out/*.out\"},{\"wildcard\":\"outputs/*.json\"}]}}}",
+        "State": "ENABLED",
+        "Description": "",
+        "EventBusName": "default",
+        "Targets": [{
+          "Id": "Idfa043eae-8363-4a75-8aba-f758ddc4973b",
+          "Arn": {
+            "Fn::Sub": "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:oarc-image-processing-pipeline"
+          },
+          "RoleArn": "arn:aws:iam::123456789123:role/service-role/Amazon_EventBridge_Invoke_StepFunctions_1177907606",
+          "RetryPolicy": {
+            "MaximumRetryAttempts": 1,
+            "MaximumEventAgeInSeconds": 360
+          }
+        }]
+      }
+    }
+  },
+  "Parameters": {}
+}

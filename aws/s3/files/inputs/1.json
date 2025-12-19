@@ -1,0 +1,6 @@
+{
+  "before": "1-before.png",
+  "after": "1-after.png",
+  "compared_output": "1-before-compared.png",
+  "llm_output": "1.txt"
+}
