@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p layer/python
 
 # Install dependencies into the layer
-pip install -r "${SCRIPT_DIR}/../requirements.txt" -t layer/python/ --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade
+pip install -r "${SCRIPT_DIR}/../requirements.txt" -t layer/python/ --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 --only-binary=:all: --upgrade
 
 # Create zip file for the layer
 cd layer
