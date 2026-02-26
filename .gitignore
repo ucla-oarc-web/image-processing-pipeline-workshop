@@ -1,7 +1,32 @@
-__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.pytest_cache/
+
+# CDK
+cdk.out/
+.cdk.staging/
+cdk-output.txt
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Model files (large)
 *.gz
 *.safetensors
-.venv
+*.tar.gz
 model/*.json
-archive
+
+# Project specific
+archive/
+
+.kiro
