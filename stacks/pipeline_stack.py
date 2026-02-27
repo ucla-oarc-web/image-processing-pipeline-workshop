@@ -167,3 +167,74 @@ class PipelineStack(cdk.Stack):
             ),
             targets=[events_targets.SfnStateMachine(state_machine)],
         )
+
+        # -----------------------------------------------------------
+        # SageMaker Model + EndpointConfig (no cost, created once)
+        # -----------------------------------------------------------
+        tags = [cdk.CfnTag(key=k, value=v)
+                for k, v in (self.node.try_get_context("tags") or {}).items()]
+
+        sam3_image = cdk.aws_ecr_assets.DockerImageAsset(
+            self, "SAM3Image",
+            directory=os.path.join(os.path.dirname(__file__), "sagemaker", "sam3"),
+            platform=cdk.aws_ecr_assets.Platform.LINUX_AMD64,
+        )
+
+        sagemaker_role = iam.Role(
+            self, "SageMakerExecutionRole",
+            role_name=f"{prefix}-sagemaker-execution-role",
+            assumed_by=iam.ServicePrincipal("sagemaker.amazonaws.com"),
+        )
+        bucket.grant_read(sagemaker_role)
+        bucket.grant_write(sagemaker_role, "async-out/*")
+        bucket.grant_write(sagemaker_role, "async-failure/*")
+        bucket.grant_write(sagemaker_role, "compared/*")
+        sagemaker_role.add_to_policy(iam.PolicyStatement(
+            actions=["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage", "ecr:GetAuthorizationToken"],
+            resources=["*"],
+        ))
+        sagemaker_role.add_to_policy(iam.PolicyStatement(
+            actions=["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            resources=[f"arn:{self.partition}:logs:{self.region}:{self.account}:log-group:/aws/sagemaker/*"],
+        ))
+
+        sm_model = sagemaker.CfnModel(
+            self, "SAM3Model",
+            execution_role_arn=sagemaker_role.role_arn,
+            primary_container=sagemaker.CfnModel.ContainerDefinitionProperty(
+                image=sam3_image.image_uri,
+            ),
+            tags=tags,
+        )
+        sm_model.node.add_dependency(sagemaker_role)
+
+        sm_endpoint_config = sagemaker.CfnEndpointConfig(
+            self, "SAM3EndpointConfig",
+            production_variants=[sagemaker.CfnEndpointConfig.ProductionVariantProperty(
+                variant_name="primary",
+                model_name=sm_model.attr_model_name,
+                initial_instance_count=1,
+                instance_type="ml.g4dn.xlarge",
+            )],
+            async_inference_config=sagemaker.CfnEndpointConfig.AsyncInferenceConfigProperty(
+                output_config=sagemaker.CfnEndpointConfig.AsyncInferenceOutputConfigProperty(
+                    s3_output_path=f"s3://{bucket_name}/async-out/",
+                    s3_failure_path=f"s3://{bucket_name}/async-failure/",
+                ),
+                client_config=sagemaker.CfnEndpointConfig.AsyncInferenceClientConfigProperty(
+                    max_concurrent_invocations_per_instance=1,
+                ),
+            ),
+            tags=tags,
+        )
+        sm_endpoint_config.add_dependency(sm_model)
+
+        # -----------------------------------------------------------
+        # Outputs
+        # -----------------------------------------------------------
+        cdk.CfnOutput(self, "StateMachineArn", value=state_machine.state_machine_arn)
+        cdk.CfnOutput(self, "EndpointName", value=endpoint_name)
+        cdk.CfnOutput(self, "EndpointConfigName", value=sm_endpoint_config.attr_endpoint_config_name)
+        cdk.CfnOutput(self, "CostWarning",
+                       value="WARNING: SageMaker endpoint costs ~$0.736/hr (~$530/month). "
+                             "Auto-shutdown after 1hr inactivity. Daily cleanup at 2AM UTC.")
