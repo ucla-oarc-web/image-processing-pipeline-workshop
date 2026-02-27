@@ -62,7 +62,52 @@ class PipelineStack(cdk.Stack):
                 f"arn:{self.partition}:bedrock:{self.region}:{self.account}:inference-profile/{bedrock_model_id}",
             ],
         ))
+
+        # -----------------------------------------------------------
+        # Endpoint Monitor Lambda (auto-shutdown for SageMaker)
+        # -----------------------------------------------------------
         endpoint_arn = self.format_arn(service="sagemaker", resource="endpoint", resource_name=endpoint_name)
+
+        monitor = lambda_.DockerImageFunction(
+            self, "EndpointMonitorFunction",
+            function_name=f"{prefix}-endpoint-monitor",
+            code=lambda_.DockerImageCode.from_image_asset(
+                os.path.join(LAMBDA_DIR, "endpoint_monitor"),
+                platform=cdk.aws_ecr_assets.Platform.LINUX_AMD64,
+            ),
+            memory_size=128,
+            timeout=cdk.Duration.minutes(5),
+            environment={"SAGEMAKER_ENDPOINT_NAME": endpoint_name},
+        )
+        monitor.add_to_role_policy(iam.PolicyStatement(
+            actions=["sagemaker:DescribeEndpoint", "sagemaker:DeleteEndpoint"],
+            resources=[endpoint_arn],
+        ))
+
+        # CloudWatch Alarm - triggers when zero invocations for 1 hour
+        alarm = cloudwatch.Alarm(
+            self, "IdleEndpointAlarm",
+            alarm_name=f"{prefix}-sagemaker-idle-endpoint",
+            metric=cloudwatch.Metric(
+                namespace="AWS/SageMaker", metric_name="InvocationsProcessed",
+                dimensions_map={"EndpointName": endpoint_name, "VariantName": "primary"},
+                statistic="Sum", period=cdk.Duration.hours(1),
+            ),
+            threshold=1,
+            comparison_operator=cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
+        )
+        alarm.add_alarm_action(cw_actions.LambdaAction(monitor))
+
+        # Daily safety net at 2 AM UTC
+        events.Rule(
+            self, "DailyEndpointCleanupRule",
+            rule_name=f"{prefix}-daily-endpoint-cleanup",
+            schedule=events.Schedule.cron(hour="2", minute="0"),
+            targets=[events_targets.LambdaFunction(monitor)],
+        )
+
         # -----------------------------------------------------------
         # Step Functions state machine
         # -----------------------------------------------------------
