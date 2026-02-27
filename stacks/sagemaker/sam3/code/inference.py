@@ -30,12 +30,7 @@ def input_fn(request_body, request_content_type):
         input_data = json.loads(request_body)
 
         # Validate required fields
-        required_fields = [
-            'before_image',
-            'after_image',
-            'compared_output',
-            'text'
-        ]
+        required_fields = ['before_image', 'after_image', 'compared_output', 'text']
         for field in required_fields:
             if field not in input_data:
                 raise ValueError(f"Missing required field: {field}")
