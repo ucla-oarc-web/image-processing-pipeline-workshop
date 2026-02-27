@@ -23,21 +23,40 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3 = boto3.client("s3")
-bedrock = boto3.client("bedrock-runtime")
+from botocore.config import Config
+
+bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=600))
 dynamodb = boto3.resource("dynamodb")
 
 
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-20250514-v1:0")
 ROUTING_TABLE_NAME = os.environ["ROUTING_TABLE_NAME"]
-PROMPT_S3_KEY = os.environ.get("PROMPT_S3_KEY", "adjuster_prompt.txt")
 
 table = dynamodb.Table(ROUTING_TABLE_NAME)
 
 
+def _load_prompt() -> str:
+    """Load prompt from local prompt.txt file."""
+    prompt_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
+    try:
+        with open(prompt_path, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.warning("prompt.txt not found, using built-in prompt")
+        return _base_prompt()
+
+
 def _extract_bucket_key(event: Dict[str, Any]) -> Tuple[str, str]:
+    # Direct invocation
     if "bucket" in event and "key" in event:
         return event["bucket"], event["key"]
 
+    # EventBridge S3 event
+    detail = event.get("detail", {})
+    if "bucket" in detail and "object" in detail:
+        return detail["bucket"]["name"], unquote_plus(detail["object"]["key"])
+
+    # S3 notification
     records = event.get("Records", [])
     if records:
         first = records[0]
@@ -46,7 +65,7 @@ def _extract_bucket_key(event: Dict[str, Any]) -> Tuple[str, str]:
             key = unquote_plus(first["s3"]["object"]["key"])
             return bucket, key
 
-    raise ValueError("Event must contain either {bucket,key} or S3 Records")
+    raise ValueError("Event must contain either {bucket,key}, EventBridge detail, or S3 Records")
 
 
 def _load_s3_text(bucket: str, key: str) -> str:
@@ -87,62 +106,75 @@ def _base_prompt() -> str:
     )
 
 
+def _resize_image(image_bytes: bytes, max_size_bytes: int = 3_900_000) -> bytes:
+    """Resize an image to fit within the Bedrock API size limit (5MB after base64 encoding)."""
+    if len(image_bytes) <= max_size_bytes:
+        return image_bytes
+
+    img = Image.open(io.BytesIO(image_bytes))
+
+    # Try JPEG at decreasing quality
+    for quality in (85, 70, 50, 30):
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=quality)
+        if len(buf.getvalue()) <= max_size_bytes:
+            return buf.getvalue()
+
+    # Scale down until it fits
+    while True:
+        width, height = img.size
+        img = img.resize((int(width * 0.8), int(height * 0.8)), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=70)
+        if len(buf.getvalue()) <= max_size_bytes:
+            return buf.getvalue()
+
+
 def _invoke_bedrock(image_bytes: bytes, image_key: str, prompt_text: str) -> Dict[str, Any]:
-    last_cleaned = ""
-    last_stop_reason = "unknown"
+    # Resize if needed (same logic as processor Lambda)
+    image_bytes = _resize_image(image_bytes)
+    media_type = "image/jpeg" if image_bytes[0:2] == b'\xff\xd8' else "image/png"
 
-    for max_tokens in [2500, 5000, 8000]:
-        payload = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": _guess_media_type(image_key),
-                                "data": base64.b64encode(image_bytes).decode("utf-8"),
-                            },
+    payload = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 32000,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": base64.b64encode(image_bytes).decode("utf-8"),
                         },
-                    ],
-                }
-            ],
-        }
+                    },
+                ],
+            }
+        ],
+    }
 
-        response = bedrock.invoke_model(modelId=MODEL_ID, body=json.dumps(payload))
-        body = json.loads(response["body"].read())
-        last_stop_reason = str(body.get("stop_reason", "unknown"))
+    logger.info("Calling Bedrock (max_tokens=32000, image_size=%d bytes)", len(image_bytes))
+    response = bedrock.invoke_model(modelId=MODEL_ID, body=json.dumps(payload))
+    body = json.loads(response["body"].read())
+    stop_reason = str(body.get("stop_reason", "unknown"))
+    logger.info("Bedrock responded (stop_reason=%s)", stop_reason)
 
-        text_chunks = [
-            item.get("text", "")
-            for item in body.get("content", [])
-            if item.get("type") == "text"
-        ]
-        model_text = "\n".join(text_chunks).strip()
+    text_chunks = [
+        item.get("text", "")
+        for item in body.get("content", [])
+        if item.get("type") == "text"
+    ]
+    model_text = "\n".join(text_chunks).strip()
+    cleaned = model_text.replace("```json", "").replace("```", "").strip()
 
-        if not model_text:
-            logger.warning("Empty Bedrock response text (max_tokens=%s)", max_tokens)
-            continue
-
-        cleaned = model_text.replace("```json", "").replace("```", "").strip()
-        last_cleaned = cleaned
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.warning(
-                "Failed to parse Bedrock JSON (max_tokens=%s, stop_reason=%s)",
-                max_tokens,
-                last_stop_reason,
-            )
-            if last_stop_reason != "max_tokens":
-                break
-
-    logger.error("Non-JSON Bedrock response (final stop_reason=%s): %s", last_stop_reason, last_cleaned)
-    raise RuntimeError("Bedrock response is not valid JSON")
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.error("Non-JSON Bedrock response (stop_reason=%s): %s", stop_reason, cleaned)
+        raise RuntimeError("Bedrock response is not valid JSON")
 
 
 def _normalize_decisions(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -370,13 +402,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
                 "reason": "unsupported-prefix",
             }
 
-        prompt_text = _base_prompt()
-        try:
-            custom_prompt = _load_s3_text(bucket, PROMPT_S3_KEY)
-            if custom_prompt.strip():
-                prompt_text = f"{prompt_text}\n\nAdditional instructions:\n{custom_prompt.strip()}"
-        except RuntimeError:
-            logger.info("No custom prompt found at s3://%s/%s; using built-in prompt", bucket, PROMPT_S3_KEY)
+        prompt_text = _load_prompt()
 
         image_bytes = _load_s3_binary(bucket, key)
         raw_model_output = _invoke_bedrock(image_bytes, key, prompt_text)

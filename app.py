@@ -12,6 +12,7 @@ Destroy all:   cdk destroy --all
 import aws_cdk as cdk
 from stacks.storage_stack import StorageStack
 from stacks.pipeline_stack import PipelineStack
+from stacks.adjuster_stack import OarcWsAdjusterStack
 
 app = cdk.App()
 
@@ -22,7 +23,12 @@ pipeline = PipelineStack(app, "OarcWsPipelineStack",
                          bucket=storage.bucket,
                          description="OARC Image Pipeline - Lambda, Step Functions, EventBridge, monitoring")
 
+adjuster = OarcWsAdjusterStack(app, "OarcWsAdjusterStack",
+                               description="OARC Image Pipeline - Downstream adjuster for insurance processing")
+
 pipeline.add_dependency(storage)
+adjuster.add_dependency(storage)
+
 tags: dict = app.node.try_get_context("tags") or {}
 for tag_key, tag_value in tags.items():
     cdk.Tags.of(app).add(tag_key, tag_value)

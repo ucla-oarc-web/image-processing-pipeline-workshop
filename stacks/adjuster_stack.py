@@ -1,31 +1,29 @@
+import aws_cdk as cdk
+from constructs import Construct
 from aws_cdk import (
-    BundlingOptions,
-    Duration,
-    Stack,
     aws_dynamodb as dynamodb,
+    aws_events as events,
+    aws_events_targets as events_targets,
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_s3 as s3,
-    aws_s3_notifications as s3_notifications,
 )
-from constructs import Construct
 
-class AdjusterStack(Stack):
+class OarcWsAdjusterStack(cdk.Stack):
+    """Stack for downstream adjuster Lambda that processes compared images."""
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        source_bucket_name = self.node.try_get_context("sourceBucketName") or "oarc-ws-image-processing-pipeline"
-        prompt_key = self.node.try_get_context("promptKey") or "adjuster_prompt.txt"
-        model_id = self.node.try_get_context("bedrockModelId") or "us.anthropic.claude-sonnet-4-20250514-v1:0"
-        disable_docker_bundling = str(self.node.try_get_context("disableDockerBundling") or "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
+        # Read config from cdk.json
+        bucket_name = self.node.try_get_context("bucket_name")
+        model_id = self.node.try_get_context("adjuster_model_id") or self.node.try_get_context("bedrock_model_id")
+        prefix = self.node.try_get_context("resource_prefix")
 
-        source_bucket = s3.Bucket.from_bucket_name(self, "SourceComparedBucket", source_bucket_name)
+        # Reference existing S3 bucket
+        bucket = s3.Bucket.from_bucket_name(self, "Bucket", bucket_name)
 
+        # DynamoDB table for routing
         routing_table = dynamodb.Table(
             self,
             "RoutingTable",
@@ -33,64 +31,59 @@ class AdjusterStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         )
 
-        lambda_code = _lambda.Code.from_asset(
-            ".",
-            bundling=BundlingOptions(
-                image=_lambda.Runtime.PYTHON_3_12.bundling_image,
-                command=[
-                    "bash",
-                    "-c",
-                    "pip install -r lambda-requirements.txt -t /asset-output && cp adjuster_lambda.py /asset-output/",
-                ],
-            ),
-        )
-
-        if disable_docker_bundling:
-            lambda_code = _lambda.Code.from_asset(
-                ".",
-                exclude=[
-                    "cdk.out",
-                    "cdk.out/**",
-                    ".venv",
-                    ".venv/**",
-                    ".git",
-                    ".git/**",
-                    "tests",
-                    "tests/**",
-                    "__pycache__",
-                    "**/__pycache__/**",
-                    "*.pyc",
-                    "**/*.pyc",
-                ],
-            )
-
-        adjuster_lambda = _lambda.Function(
+        # Adjuster Lambda (Docker container)
+        adjuster_lambda = _lambda.DockerImageFunction(
             self,
-            "DownstreamAdjusterFunction",
-            runtime=_lambda.Runtime.PYTHON_3_12,
-            handler="adjuster_lambda.lambda_handler",
-            code=lambda_code,
-            timeout=Duration.seconds(120),
+            "AdjusterFunction",
+            function_name=f"{prefix}-adjuster",
+            code=_lambda.DockerImageCode.from_image_asset(
+                "stacks/lambda_functions/adjuster",
+                platform=cdk.aws_ecr_assets.Platform.LINUX_AMD64,
+                asset_name=f"{prefix}-adjuster-lambda",
+            ),
+            timeout=cdk.Duration.minutes(10),
             memory_size=1024,
+            retry_attempts=0,
             environment={
                 "ROUTING_TABLE_NAME": routing_table.table_name,
-                "PROMPT_S3_KEY": prompt_key,
                 "BEDROCK_MODEL_ID": model_id,
             },
         )
 
+        # Permissions
         routing_table.grant_write_data(adjuster_lambda)
-        source_bucket.grant_read(adjuster_lambda)
+        bucket.grant_read_write(adjuster_lambda)
 
+        # Scope Bedrock to specific model
         adjuster_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel"],
-                resources=["*"],
+                resources=[
+                    f"arn:{self.partition}:bedrock:*::foundation-model/{model_id}",
+                    f"arn:{self.partition}:bedrock:*::foundation-model/{model_id.removeprefix('us.')}",
+                    f"arn:{self.partition}:bedrock:{self.region}:{self.account}:inference-profile/{model_id}",
+                ],
             )
         )
 
-        source_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3_notifications.LambdaDestination(adjuster_lambda),
-            s3.NotificationKeyFilter(prefix="compared/"),
+        # EventBridge rule for compared/ prefix (not S3 notifications)
+        events.Rule(
+            self,
+            "ComparedObjectCreatedRule",
+            rule_name=f"{prefix}-adjuster-trigger",
+            event_pattern=events.EventPattern(
+                source=["aws.s3"],
+                detail_type=["Object Created"],
+                detail={
+                    "bucket": {"name": [bucket_name]},
+                    "object": {"key": [{"wildcard": "compared/*"}]},
+                },
+            ),
+            targets=[events_targets.LambdaFunction(
+                adjuster_lambda,
+                retry_attempts=0,
+            )],
         )
+
+        # Stack outputs
+        cdk.CfnOutput(self, "RoutingTableName", value=routing_table.table_name)
