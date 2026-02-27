@@ -30,3 +30,10 @@ model/*.json
 archive/
 
 .kiro
+
+files/reports/*
+!files/reports/.gitkeep
+
+diagrams
+
+.archive
