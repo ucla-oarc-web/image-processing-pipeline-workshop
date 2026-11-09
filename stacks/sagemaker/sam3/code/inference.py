@@ -56,7 +56,7 @@ def input_fn(request_body, request_content_type):
         raise ValueError(f"Unsupported content type: {request_content_type}")
 
 def _process_image(image, input_data, model_dict):
-    """Process single image and return mask coordinates"""
+    """Segment one image and return a bounding box (x_min, y_min, x_max, y_max) per detected object"""
     device = model_dict["device"]
     text_prompt = input_data["text"]
     model = model_dict["model"]
@@ -74,15 +74,14 @@ def _process_image(image, input_data, model_dict):
         target_sizes=inputs.get("original_sizes").tolist()
     )[0]
 
-    masks = []
-    if "masks" in results:
-        mask_tensors = results["masks"].cpu().numpy()
-        for mask in mask_tensors:
-            y_coords, x_coords = mask.nonzero()
-            coords = [[int(x), int(y)] for x, y in zip(x_coords, y_coords)]
-            masks.append(coords)
+    boxes = []
+    for mask in results.get("masks", []):
+        y_coords, x_coords = torch.nonzero(mask, as_tuple=True)
+        if len(x_coords) == 0:
+            continue
+        boxes.append((int(x_coords.min()), int(y_coords.min()), int(x_coords.max()), int(y_coords.max())))
 
-    return masks
+    return boxes
 
 def _save_image_to_s3(image, s3_uri):
     """Helper to save image to S3"""
@@ -112,23 +111,18 @@ def predict_fn(input_data, model_dict):
     after_image = input_data["after_image_data"]
 
     # Process both images
-    before_masks = _process_image(before_image, input_data, model_dict)
-    after_masks = _process_image(after_image, input_data, model_dict)
+    before_boxes = _process_image(before_image, input_data, model_dict)
+    after_boxes = _process_image(after_image, input_data, model_dict)
 
     # Compare masks and draw outlines
     compared_image = before_image.copy()
     draw = ImageDraw.Draw(compared_image)
 
     # Find surviving vs destroyed houses
-    for before_mask in before_masks:
-        house_survived = False
-        for after_mask in after_masks:
-            if _calculate_overlap(before_mask, after_mask) > 0.5:
-                house_survived = True
-                break
-
+    for before_box in before_boxes:
+        house_survived = any(_calculate_overlap(before_box, after_box) > 0.5 for after_box in after_boxes)
         color = "green" if house_survived else "red"
-        _draw_outline(draw, before_mask, color, width=3)
+        draw.rectangle(before_box, outline=color, width=3)
 
     # Save compared image to specified S3 location
     _save_image_to_s3(compared_image, compared_output_uri)
@@ -140,23 +134,10 @@ def predict_fn(input_data, model_dict):
     }
 
 
-def _calculate_overlap(mask1, mask2):
-    """Calculate overlap using bounding box intersection for better spatial matching"""
-    if not mask1 or not mask2:
-        return 0
-
-    # Get bounding boxes
-    x1_coords = [coord[0] for coord in mask1]
-    y1_coords = [coord[1] for coord in mask1]
-    bbox1 = (min(x1_coords), min(y1_coords), max(x1_coords), max(y1_coords))
-
-    x2_coords = [coord[0] for coord in mask2]
-    y2_coords = [coord[1] for coord in mask2]
-    bbox2 = (min(x2_coords), min(y2_coords), max(x2_coords), max(y2_coords))
-
-    # Calculate bounding box intersection
-    x1, y1, x1_max, y1_max = bbox1
-    x2, y2, x2_max, y2_max = bbox2
+def _calculate_overlap(box1, box2):
+    """Intersection over union (IoU) of two (x_min, y_min, x_max, y_max) boxes"""
+    x1, y1, x1_max, y1_max = box1
+    x2, y2, x2_max, y2_max = box2
 
     # Find intersection rectangle
     intersect_x1 = max(x1, x2)
@@ -170,30 +151,11 @@ def _calculate_overlap(mask1, mask2):
 
     # Calculate areas
     intersect_area = (intersect_x2 - intersect_x1) * (intersect_y2 - intersect_y1)
-    bbox1_area = (x1_max - x1) * (y1_max - y1)
-    bbox2_area = (x2_max - x2) * (y2_max - y2)
-    union_area = bbox1_area + bbox2_area - intersect_area
+    box1_area = (x1_max - x1) * (y1_max - y1)
+    box2_area = (x2_max - x2) * (y2_max - y2)
+    union_area = box1_area + box2_area - intersect_area
 
     return intersect_area / union_area if union_area > 0 else 0
-
-def _draw_outline(draw, mask_coords, color, width):
-    """Draw outline around mask coordinates"""
-    if not mask_coords:
-        return
-
-    # Find bounding box
-    x_coords = [coord[0] for coord in mask_coords]
-    y_coords = [coord[1] for coord in mask_coords]
-
-    min_x, max_x = min(x_coords), max(x_coords)
-    min_y, max_y = min(y_coords), max(y_coords)
-
-    # Draw rectangle outline
-    draw.rectangle(
-        [(min_x, min_y), (max_x, max_y)],
-        outline=color,
-        width=width
-    )
 
 def output_fn(prediction_output, content_type):
     """Format output"""
