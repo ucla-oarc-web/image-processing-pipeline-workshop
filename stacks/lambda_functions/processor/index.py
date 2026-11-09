@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 import boto3
+from anthropic import AnthropicBedrock
 from botocore.exceptions import ClientError
 from PIL import Image
 
@@ -26,9 +27,10 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3_client = boto3.client("s3")
-bedrock_client = boto3.client("bedrock-runtime")
+claude = AnthropicBedrock()  # region and credentials come from the Lambda environment
 
 BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
+MAX_TOKENS = 16000  # includes Claude's thinking, so leave plenty of room
 
 
 # ---------------------------------------------------------------------------
@@ -90,33 +92,37 @@ def resize_image(image_bytes, max_size_bytes=3_900_000):
 # ---------------------------------------------------------------------------
 
 def call_bedrock(compare_bytes, prompt):
-    """Send the comparison image to Bedrock Claude for analysis."""
+    """Send the comparison image to Claude on Bedrock and return its text answer."""
     resized_bytes = resize_image(compare_bytes)
     media_type = "image/jpeg" if resized_bytes[0:2] == b'\xff\xd8' else "image/png"
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "image", "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64.b64encode(resized_bytes).decode(),
+        }},
+    ]
 
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4096,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": base64.b64encode(resized_bytes).decode(),
-                }},
-            ],
-        }],
-    }
+    # Stream so long thinking doesn't hit HTTP timeouts
+    with claude.messages.stream(
+        model=BEDROCK_MODEL_ID,
+        max_tokens=MAX_TOKENS,
+        output_config={"effort": "medium"},
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        message = stream.get_final_message()
+    logger.info("Claude responded (stop_reason=%s, usage=%s)", message.stop_reason, message.usage)
 
-    response = bedrock_client.invoke_model(modelId=BEDROCK_MODEL_ID, body=json.dumps(payload))
-    body = json.loads(response["body"].read())
-
-    for item in body.get("content", []):
-        if item.get("type") == "text":
-            return item["text"]
-    return json.dumps(body)
+    # Check why Claude stopped before using its answer
+    if message.stop_reason == "refusal":
+        raise RuntimeError(f"Claude declined the request: {message.stop_details}")
+    text = "".join(b.text for b in message.content if b.type == "text").strip()
+    if not text:
+        raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
+    if message.stop_reason == "max_tokens":
+        text += "\n\n_(Analysis truncated: the model reached its output limit.)_"
+    return text
 
 
 # ---------------------------------------------------------------------------

@@ -47,7 +47,8 @@ class PipelineStack(cdk.Stack):
                 platform=cdk.aws_ecr_assets.Platform.LINUX_AMD64,
             ),
             memory_size=512,
-            timeout=cdk.Duration.minutes(3),
+            # Claude thinks before answering; leave room for long analyses
+            timeout=cdk.Duration.minutes(10),
             environment={
                 "BUCKET_NAME": bucket_name,
                 "BEDROCK_MODEL_ID": bedrock_model_id,
@@ -55,7 +56,7 @@ class PipelineStack(cdk.Stack):
         )
         bucket.grant_read_write(processor)
         processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["bedrock:InvokeModel"],
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
             resources=[
                 f"arn:{self.partition}:bedrock:*::foundation-model/{bedrock_model_id}",
                 f"arn:{self.partition}:bedrock:*::foundation-model/{bedrock_model_id.removeprefix('us.')}",
