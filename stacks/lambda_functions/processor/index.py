@@ -63,28 +63,13 @@ def save_text_to_s3(text, bucket, key):
 # Image helpers
 # ---------------------------------------------------------------------------
 
-def resize_image(image_bytes, max_size_bytes=3_900_000):
-    """Resize an image to fit within the Bedrock API size limit (5MB after base64 encoding)."""
-    if len(image_bytes) <= max_size_bytes:
-        return image_bytes
-
-    img = Image.open(BytesIO(image_bytes))
-
-    # Try JPEG at decreasing quality
-    for quality in (85, 70, 50, 30):
-        buf = BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=quality)
-        if len(buf.getvalue()) <= max_size_bytes:
-            return buf.getvalue()
-
-    # Scale down until it fits
-    while True:
-        width, height = img.size
-        img = img.resize((int(width * 0.8), int(height * 0.8)), Image.Resampling.LANCZOS)
-        buf = BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=70)
-        if len(buf.getvalue()) <= max_size_bytes:
-            return buf.getvalue()
+def to_jpeg(image_bytes, max_edge, quality=85):
+    """Downscale so the longest edge is at most max_edge pixels and encode as JPEG."""
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -93,14 +78,12 @@ def resize_image(image_bytes, max_size_bytes=3_900_000):
 
 def call_bedrock(compare_bytes, prompt):
     """Send the comparison image to Claude on Bedrock and return its text answer."""
-    resized_bytes = resize_image(compare_bytes)
-    media_type = "image/jpeg" if resized_bytes[0:2] == b'\xff\xd8' else "image/png"
     content = [
         {"type": "text", "text": prompt},
         {"type": "image", "source": {
             "type": "base64",
-            "media_type": media_type,
-            "data": base64.b64encode(resized_bytes).decode(),
+            "media_type": "image/jpeg",
+            "data": base64.b64encode(to_jpeg(compare_bytes, max_edge=2000)).decode(),
         }},
     ]
 
@@ -245,34 +228,13 @@ _End of Report_
 
 def save_markdown_to_s3(markdown_content, bucket, base_name, image_uris):
     """Save the markdown report with embedded base64 images to S3."""
-    # Load and resize images to embed in markdown
-    embedded_images = {}
-    target_sizes = {"before": 300, "after": 300, "compared": 600}
+    target_widths = {"before": 300, "after": 300, "compared": 600}
 
+    # Replace image src placeholders with small embedded JPEG data URIs
     for img_type, s3_uri in image_uris.items():
-        if s3_uri.startswith("s3://"):
-            img_bytes = load_s3_binary(s3_uri)
-            img = Image.open(BytesIO(img_bytes))
-
-            # Resize to smaller dimensions
-            max_width = target_sizes.get(img_type, 400)
-            if img.width > max_width:
-                ratio = max_width / img.width
-                new_size = (max_width, int(img.height * ratio))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-
-            # Convert to JPEG with compression for smaller file size
-            buffer = BytesIO()
-            img.convert("RGB").save(buffer, format="JPEG", quality=75, optimize=True)
-            b64_data = base64.b64encode(buffer.getvalue()).decode()
-            embedded_images[img_type] = f"data:image/jpeg;base64,{b64_data}"
-
-    # Replace image src with base64 data URIs
-    for img_type, data_uri in embedded_images.items():
-        markdown_content = markdown_content.replace(
-            f'{img_type}_image_{base_name}.png',
-            data_uri
-        )
+        jpeg = to_jpeg(load_s3_binary(s3_uri), max_edge=target_widths[img_type], quality=75)
+        data_uri = f"data:image/jpeg;base64,{base64.b64encode(jpeg).decode()}"
+        markdown_content = markdown_content.replace(f"{img_type}_image_{base_name}.png", data_uri)
 
     markdown_key = f"markdown/{base_name}.md"
     s3_client.put_object(
