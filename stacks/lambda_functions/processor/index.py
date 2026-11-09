@@ -11,15 +11,16 @@ Environment variables (set by CDK):
   BUCKET_NAME       - S3 bucket for all pipeline data
   BEDROCK_MODEL_ID  - Bedrock model identifier for Claude
 """
-import json
-import os
-import logging
 import base64
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from io import BytesIO
 
 import boto3
 from botocore.exceptions import ClientError
 from PIL import Image
-from io import BytesIO
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -27,8 +28,7 @@ logger.setLevel(logging.INFO)
 s3_client = boto3.client("s3")
 bedrock_client = boto3.client("bedrock-runtime")
 
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "oarc-image-processing-pipeline")
-BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0")
+BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +125,9 @@ def call_bedrock(compare_bytes, prompt):
 
 def process_sam3_analysis(bucket, key):
     """Read SageMaker output, call Bedrock, and save LLM analysis to S3."""
-    from datetime import datetime, timezone
-
     sam3_output = load_json_from_s3(bucket, key)
-    prompt = open(os.path.join(os.path.dirname(__file__), "prompt.txt")).read()
+    with open(os.path.join(os.path.dirname(__file__), "prompt.txt")) as f:
+        prompt = f.read()
 
     compare_bytes = load_s3_binary(sam3_output["compare"])
     llm_result = call_bedrock(compare_bytes, prompt)
