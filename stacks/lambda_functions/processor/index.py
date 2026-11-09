@@ -151,14 +151,13 @@ def process_sam3_analysis(bucket, key):
         "after": sam3_output["after"],
         "compared": sam3_output["compare"],
         "llm_output": llm_uri,
+        "llm_text": llm_result,
         "base_name": base_name,
     }
 
 
-def generate_markdown_report(data, base_name):
+def generate_markdown_report(llm_text, base_name):
     """Generate a styled markdown/HTML report with embedded image references."""
-    llm_text = load_s3_binary(data["llm_output"]).decode()
-
     return f"""# Palisades Fire Analysis Report
 
 ## Before and After Images
@@ -270,7 +269,7 @@ def lambda_handler(event, _context):
     analysis_result = process_sam3_analysis(bucket, key)
 
     # Step 2: Generate styled markdown report
-    markdown_content = generate_markdown_report(analysis_result, analysis_result["base_name"])
+    markdown_content = generate_markdown_report(analysis_result["llm_text"], analysis_result["base_name"])
 
     # Step 3: Save report and images to S3
     image_uris = {
