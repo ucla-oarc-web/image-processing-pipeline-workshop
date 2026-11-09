@@ -33,9 +33,6 @@ adjuster = OarcWsAdjusterStack(app, "OarcWsAdjusterStack", env=env,
                                bucket=storage.bucket,
                                description="OARC Image Pipeline - Downstream adjuster for insurance processing")
 
-pipeline.add_dependency(storage)
-adjuster.add_dependency(storage)
-
 tags: dict = app.node.try_get_context("tags") or {}
 for tag_key, tag_value in tags.items():
     cdk.Tags.of(app).add(tag_key, tag_value)

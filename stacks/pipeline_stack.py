@@ -273,7 +273,6 @@ class PipelineStack(cdk.Stack):
             ),
             tags=tags,
         )
-        sm_endpoint_config.add_dependency(sm_model)
 
         # -----------------------------------------------------------
         # Outputs
