@@ -8,8 +8,8 @@
     "endpoint_name": "oarc-ws-sam3-endpoint",
     "model_name": "oarc-ws-sam3-model",
     "endpoint_config_name": "oarc-ws-sam3-config",
-    "bedrock_model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "adjuster_model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "bedrock_model_id": "us.anthropic.claude-opus-5-5",
+    "adjuster_model_id": "us.anthropic.claude-opus-5-5",
     "tags": {
       "client": "oarc-workshop",
       "project": "oarc-image-pipeline",

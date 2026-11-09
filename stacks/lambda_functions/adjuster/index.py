@@ -29,7 +29,7 @@ bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=600))
 dynamodb = boto3.resource("dynamodb")
 
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-20250514-v1:0")
+MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
 ROUTING_TABLE_NAME = os.environ["ROUTING_TABLE_NAME"]
 
 table = dynamodb.Table(ROUTING_TABLE_NAME)
