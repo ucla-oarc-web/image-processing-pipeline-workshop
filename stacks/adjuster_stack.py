@@ -12,16 +12,12 @@ from aws_cdk import (
 class OarcWsAdjusterStack(cdk.Stack):
     """Stack for downstream adjuster Lambda that processes compared images."""
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, *, bucket: s3.IBucket, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         # Read config from cdk.json
-        bucket_name = self.node.try_get_context("bucket_name")
         model_id = self.node.try_get_context("adjuster_model_id") or self.node.try_get_context("bedrock_model_id")
         prefix = self.node.try_get_context("resource_prefix")
-
-        # Reference existing S3 bucket
-        bucket = s3.Bucket.from_bucket_name(self, "Bucket", bucket_name)
 
         # DynamoDB table for routing
         routing_table = dynamodb.Table(
@@ -75,7 +71,7 @@ class OarcWsAdjusterStack(cdk.Stack):
                 source=["aws.s3"],
                 detail_type=["Object Created"],
                 detail={
-                    "bucket": {"name": [bucket_name]},
+                    "bucket": {"name": [bucket.bucket_name]},
                     "object": {"key": [{"wildcard": "compared/*"}]},
                 },
             ),

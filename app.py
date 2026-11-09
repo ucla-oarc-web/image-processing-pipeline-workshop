@@ -24,6 +24,7 @@ pipeline = PipelineStack(app, "OarcWsPipelineStack",
                          description="OARC Image Pipeline - Lambda, Step Functions, EventBridge, monitoring")
 
 adjuster = OarcWsAdjusterStack(app, "OarcWsAdjusterStack",
+                               bucket=storage.bucket,
                                description="OARC Image Pipeline - Downstream adjuster for insurance processing")
 
 pipeline.add_dependency(storage)
