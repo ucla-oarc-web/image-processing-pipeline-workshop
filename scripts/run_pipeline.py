@@ -17,6 +17,7 @@ import boto3
 from config import REGION, get_bucket_name
 
 MARKDOWN_PREFIX = "markdown/"
+FAILURE_PREFIX = "async-failure/"
 POLL_INTERVAL_SECONDS = 30
 
 
@@ -64,11 +65,11 @@ def upload_test_data(bucket: str, region: str):
     return len(input_files)
 
 
-def list_markdown_keys(s3_client, bucket: str) -> set:
-    """List all object keys under the markdown/ prefix."""
+def list_keys(s3_client, bucket: str, prefix: str = MARKDOWN_PREFIX) -> set:
+    """List all object keys under a prefix."""
     keys = set()
     paginator = s3_client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=MARKDOWN_PREFIX):
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             keys.add(obj["Key"])
     return keys
@@ -86,7 +87,8 @@ def watch_for_results(bucket: str, region: str, expected_count: int):
     print(f"Saving to: {reports_dir}")
     print(f"Poll interval: {POLL_INTERVAL_SECONDS}s. Press Ctrl+C to stop.\n")
 
-    known = list_markdown_keys(s3_client, bucket)
+    known = list_keys(s3_client, bucket)
+    known_failures = list_keys(s3_client, bucket, FAILURE_PREFIX)
     print(f"Found {len(known)} existing report(s).\n")
 
     # Download any existing reports not already saved locally
@@ -100,12 +102,24 @@ def watch_for_results(bucket: str, region: str, expected_count: int):
                 f.write(content)
 
     received = 0
+    failed = 0
 
     try:
-        while received < expected_count:
+        while received + failed < expected_count:
             time.sleep(POLL_INTERVAL_SECONDS)
 
-            current = list_markdown_keys(s3_client, bucket)
+            # SageMaker writes errors to async-failure/ instead of async-out/
+            failures = list_keys(s3_client, bucket, FAILURE_PREFIX)
+            for key in sorted(failures - known_failures):
+                failed += 1
+                error = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read().decode(errors="replace")
+                print(f"\n{'='*60}")
+                print(f"  SAGEMAKER FAILURE: {key}")
+                print(f"{'='*60}\n{error[:2000]}\n")
+                print("  Check the endpoint's CloudWatch logs: /aws/sagemaker/Endpoints/<endpoint-name>\n")
+            known_failures = failures
+
+            current = list_keys(s3_client, bucket)
             new_keys = current - known
 
             if new_keys:
@@ -126,10 +140,10 @@ def watch_for_results(bucket: str, region: str, expected_count: int):
 
                 known = current
             else:
-                print(f"  Waiting... ({received}/{expected_count} reports)")
+                print(f"  Waiting... ({received}/{expected_count} reports, {failed} failed)")
 
         print(f"\n{'='*60}")
-        print(f"  All {expected_count} report(s) received!")
+        print(f"  Done: {received} report(s) received, {failed} failed.")
         print(f"{'='*60}")
         print(f"\nRun 'python scripts/adjuster_report.py' for adjuster results.\n")
 
