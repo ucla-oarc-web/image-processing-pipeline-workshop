@@ -4,7 +4,7 @@
     "region": "us-west-2",
     "stack_name": "OarcWsPipelineStack",
     "resource_prefix": "oarc-ws",
-    "bucket_name": "oarc-ws-image-processing-pipeline",
+    "bucket_name": "",
     "endpoint_name": "oarc-ws-sam3-endpoint",
     "model_name": "oarc-ws-sam3-model",
     "endpoint_config_name": "oarc-ws-sam3-config",

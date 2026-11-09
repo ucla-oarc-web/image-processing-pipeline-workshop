@@ -16,7 +16,11 @@ class StorageStack(cdk.Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        bucket_name = self.node.try_get_context("bucket_name")
+        # S3 bucket names are global, so default to one that includes the
+        # account ID and region. Set "bucket_name" in cdk.json to override.
+        prefix = self.node.try_get_context("resource_prefix")
+        bucket_name = (self.node.try_get_context("bucket_name")
+                       or f"{prefix}-pipeline-{self.account}-{self.region}")
 
         self.bucket = s3.Bucket(
             self,

@@ -13,25 +13,11 @@ import sys
 import time
 
 import boto3
-from botocore.exceptions import ClientError
 
-from config import REGION, BUCKET_NAME, STACK_NAME
+from config import REGION, get_bucket_name
 
 MARKDOWN_PREFIX = "markdown/"
 POLL_INTERVAL_SECONDS = 30
-
-
-def get_bucket_from_stack(region: str) -> str:
-    """Read bucket name from CDK stack outputs."""
-    cfn = boto3.client("cloudformation", region_name=region)
-    try:
-        response = cfn.describe_stacks(StackName=STACK_NAME)
-        for output in response["Stacks"][0].get("Outputs", []):
-            if output["OutputKey"] == "BucketName":
-                return output["OutputValue"]
-    except ClientError:
-        pass
-    return BUCKET_NAME
 
 
 def upload_test_data(bucket: str, region: str):
@@ -153,7 +139,7 @@ def watch_for_results(bucket: str, region: str, expected_count: int):
 
 
 def main():
-    bucket = get_bucket_from_stack(REGION)
+    bucket = get_bucket_name()
     count = upload_test_data(bucket, REGION)
     if count == 0:
         sys.exit(1)
