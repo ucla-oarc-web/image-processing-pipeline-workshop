@@ -3,7 +3,7 @@
 This Lambda is invoked by Step Functions after SageMaker async inference
 completes. It:
   1. Reads the SageMaker output JSON from S3 (contains image URIs)
-  2. Sends the comparison image to Bedrock Claude for analysis
+  2. Sends the before, after, and comparison images to Bedrock Claude for analysis
   3. Generates a styled markdown report with before/after/compared images
   4. Saves the report to S3 (markdown/ prefix)
 
@@ -76,16 +76,20 @@ def to_jpeg(image_bytes, max_edge, quality=85):
 # Bedrock
 # ---------------------------------------------------------------------------
 
-def call_bedrock(compare_bytes, prompt):
-    """Send the comparison image to Claude on Bedrock and return its text answer."""
-    content = [
-        {"type": "text", "text": prompt},
-        {"type": "image", "source": {
+def call_bedrock(images, prompt):
+    """Send the labeled images plus the prompt to Claude on Bedrock and return its text answer.
+
+    images: list of (label, image_bytes) tuples, sent in order.
+    """
+    content = []
+    for label, image_bytes in images:
+        content.append({"type": "text", "text": f"Image: {label}"})
+        content.append({"type": "image", "source": {
             "type": "base64",
             "media_type": "image/jpeg",
-            "data": base64.b64encode(to_jpeg(compare_bytes, max_edge=2000)).decode(),
-        }},
-    ]
+            "data": base64.b64encode(to_jpeg(image_bytes, max_edge=2000)).decode(),
+        }})
+    content.append({"type": "text", "text": prompt})
 
     # Stream so long thinking doesn't hit HTTP timeouts
     with claude.messages.stream(
@@ -118,8 +122,13 @@ def process_sam3_analysis(bucket, key):
     with open(os.path.join(os.path.dirname(__file__), "prompt.txt")) as f:
         prompt = f.read()
 
-    compare_bytes = load_s3_binary(sam3_output["compare"])
-    llm_result = call_bedrock(compare_bytes, prompt)
+    images = [
+        ("1) before the fire", load_s3_binary(sam3_output["before"])),
+        ("2) after the fire", load_s3_binary(sam3_output["after"])),
+        ("3) before-fire photo, burned homes outlined in red, surviving homes in green",
+         load_s3_binary(sam3_output["compare"])),
+    ]
+    llm_result = call_bedrock(images, prompt)
 
     # Extract descriptive name from before image filename (e.g., "1-before.png" -> "1")
     before_image = sam3_output.get("before", "")
