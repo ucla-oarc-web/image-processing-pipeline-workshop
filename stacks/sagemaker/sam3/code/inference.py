@@ -6,13 +6,10 @@ from PIL import Image, ImageDraw
 from transformers import Sam3Model, Sam3Processor
 
 def _parse_s3_uri(s3_uri, field_name):
-    """Helper to validate and parse S3 URI"""
-    if not s3_uri.startswith('s3://'):
-        raise ValueError(f"{field_name} must be a valid S3 URI")
-    try:
-        return s3_uri[5:].split('/', 1)
-    except ValueError:
-        raise ValueError(f"Invalid S3 URI format for {field_name}: {s3_uri}")
+    """Validate an s3://bucket/key URI and return (bucket, key)"""
+    if not s3_uri.startswith('s3://') or '/' not in s3_uri[5:]:
+        raise ValueError(f"{field_name} must be a valid S3 URI (s3://bucket/key): {s3_uri}")
+    return s3_uri[5:].split('/', 1)
 
 def model_fn(model_dir):
     """Load the SAM3 model"""
