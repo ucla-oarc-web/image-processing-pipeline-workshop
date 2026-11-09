@@ -53,7 +53,7 @@ class OarcWsAdjusterStack(cdk.Stack):
         # Scope Bedrock to specific model
         adjuster_lambda.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:InvokeModel"],
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=[
                     f"arn:{self.partition}:bedrock:*::foundation-model/{model_id}",
                     f"arn:{self.partition}:bedrock:*::foundation-model/{model_id.removeprefix('us.')}",
