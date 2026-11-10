@@ -96,17 +96,18 @@ cdk destroy --all
 stacks/
   storage_stack.py        # S3 bucket (persists across pipeline redeployments)
   pipeline_stack.py       # Lambda, Step Functions, EventBridge, monitoring
-  lambda_functions/       # Processor and endpoint monitor Lambda code (Docker)
+  adjuster_stack.py       # Adjuster Lambda + DynamoDB routing table
+  lambda_functions/       # Processor, adjuster, and endpoint monitor Lambda code (Docker)
   sagemaker/sam3/         # SageMaker SAM3 model container (Docker, 3.4GB)
 scripts/
   config.py               # Reads config from cdk.json (do not edit)
   deploy_endpoint.py      # Create/delete/status SageMaker endpoint
-  run_pipeline.py         # Upload test inputs and watch for results
+  run_pipeline.py         # Upload test inputs and watch for results (and failures)
+  adjuster_report.py      # Show adjuster routing decisions and sync reports
 files/
   images/                 # Sample before/after satellite images
   inputs/                 # Sample JSON input files (1.json, 2.json, 3.json)
   reports/                # Generated markdown reports (output)
-diagrams/                 # Architecture diagrams and documentation
 ```
 
 ## Architecture
