@@ -119,11 +119,36 @@ S3 Upload → EventBridge → Step Functions → SageMaker (async) → Lambda �
 **Event-driven workflow:**
 1. User uploads JSON to S3 `inputs/` → EventBridge detects ObjectCreated event
 2. Step Functions reads JSON, creates payload, invokes SageMaker async endpoint
-3. SageMaker processes images with SAM3, writes comparison to S3 `compared/`
+3. SageMaker processes images with SAM3, writes the comparison image and detections to S3 `compared/`
 4. SageMaker writes output to S3 `async-out/` → triggers EventBridge again
 5. Step Functions invokes Lambda processor
 6. Lambda reads the before, after, and comparison images, calls Bedrock Claude for analysis
 7. Lambda generates styled markdown report, saves to S3 `markdown/`
+
+### Detections
+
+Each run also writes `compared/<image-id>-detections.json` (and includes the same data in
+the `async-out/` output), with one entry per house found in the before image:
+
+```json
+{
+  "image_id": "1",
+  "image_width": 1000,
+  "image_height": 1000,
+  "gsd_m": 0.5,
+  "detections": [
+    {"id": 1, "bbox": [100, 100, 140, 140], "label": "burned"},
+    {"id": 2, "bbox": [220, 100, 260, 140], "label": "survived"}
+  ]
+}
+```
+
+- `bbox` is `[x_min, y_min, x_max, y_max]` in pixels of the before image.
+- `label` is `survived` if SAM3 finds a house in the after image overlapping the before box
+  by more than 50% (intersection over union), otherwise `burned`. It is a simple rule, not
+  a damage assessment.
+- `gsd_m` (meters per pixel) is copied from the input JSON if you add it, e.g.
+  `{"before": "1-before.png", ..., "gsd_m": 0.5}`; otherwise it is `null`.
 
 ## Cost Protection
 
