@@ -35,12 +35,28 @@ Scripts in `scripts/` read from `cdk.json` and the deployed stack outputs — no
 
 ### Prerequisites
 
+- Python 3.11+, Node.js, and Docker (CDK builds the Lambda and SageMaker images locally)
+- Access to Claude Opus 5.5 in Amazon Bedrock for your account
+- A Hugging Face account that has accepted the [SAM3 license](https://huggingface.co/facebook/sam3)
+
 ```bash
-# Install AWS CDK CLI (if not already installed)
+# Install AWS CDK CLI (if not already installed). The CLI is versioned
+# separately from aws-cdk-lib; any recent version works.
 npm install -g aws-cdk
 
 # Bootstrap your AWS account for CDK (one-time setup per account/region)
 cdk bootstrap aws://ACCOUNT-ID/us-west-2
+```
+
+### Download the SAM3 weights (one time)
+
+The model weights (~3.4GB) are not in this repo. Download them next to the
+config files in `stacks/sagemaker/sam3/model/`:
+
+```bash
+pip install -U huggingface_hub
+hf auth login
+hf download facebook/sam3 --include "*.safetensors" --local-dir stacks/sagemaker/sam3/model
 ```
 
 ### Deploy
