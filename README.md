@@ -18,7 +18,7 @@ All settings are in `cdk.json`. Edit this file before deploying:
 {
   "context": {
     "region": "us-west-2",
-    "bucket_name": "oarc-ws-image-processing-pipeline",
+    "bucket_name": "",
     "endpoint_name": "oarc-ws-sam3-endpoint",
     "bedrock_model_id": "us.anthropic.claude-opus-5-5",
     ...
@@ -26,7 +26,10 @@ All settings are in `cdk.json`. Edit this file before deploying:
 }
 ```
 
-Scripts in `scripts/` automatically read from `cdk.json` — no other config needed.
+Leave `bucket_name` empty and the bucket is named `oarc-ws-pipeline-<account-id>-<region>`.
+Bucket names must be unique across all AWS accounts, and this keeps yours unique.
+
+Scripts in `scripts/` read from `cdk.json` and the deployed stack outputs — no other config needed.
 
 ## Quick Start
 
