@@ -36,6 +36,7 @@ class PipelineStack(cdk.Stack):
         bedrock_model_id = self.node.try_get_context("bedrock_model_id")
         instance_type = self.node.try_get_context("instance_type")
         price_per_hour = self.node.try_get_context("instance_price_per_hour")
+        idle_minutes = self.node.try_get_context("idle_shutdown_minutes")
         bucket_name = bucket.bucket_name
 
         # -----------------------------------------------------------
@@ -80,11 +81,16 @@ class PipelineStack(cdk.Stack):
             ),
             memory_size=128,
             timeout=cdk.Duration.minutes(5),
-            environment={"SAGEMAKER_ENDPOINT_NAME": endpoint_name},
+            environment={"SAGEMAKER_ENDPOINT_NAME": endpoint_name, "IDLE_MINUTES": str(idle_minutes)},
         )
         monitor.add_to_role_policy(iam.PolicyStatement(
             actions=["sagemaker:DescribeEndpoint", "sagemaker:DeleteEndpoint"],
             resources=[endpoint_arn],
+        ))
+
+        monitor.add_to_role_policy(iam.PolicyStatement(
+            actions=["cloudwatch:GetMetricStatistics"],  # does not support resource scoping
+            resources=["*"],
         ))
 
         # CloudWatch Alarm - triggers when zero invocations for 1 hour

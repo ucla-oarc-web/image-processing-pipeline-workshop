@@ -10,6 +10,7 @@
     "endpoint_config_name": "oarc-ws-sam3-config",
     "instance_type": "ml.g4dn.xlarge",
     "instance_price_per_hour": 0.736,
+    "idle_shutdown_minutes": 60,
     "bedrock_model_id": "us.anthropic.claude-opus-5-5",
     "adjuster_model_id": "us.anthropic.claude-opus-5-5",
     "tags": {
