@@ -7,7 +7,7 @@ Serverless ML pipeline for analyzing before/after satellite imagery using AWS se
 1. Accepts before/after satellite image pairs via S3 JSON inputs
 2. Uses SAM3 (Segment Anything Model 3) on SageMaker for object segmentation
 3. Compares images to identify changes (red = destroyed, green = survived)
-4. Uses Claude Opus 4.5 via Bedrock to analyze comparison images
+4. Uses Claude Opus 5.5 via Bedrock to analyze the before, after, and comparison images
 5. Produces styled markdown reports saved to S3
 
 ## Configuration
@@ -20,6 +20,7 @@ All settings are in `cdk.json`. Edit this file before deploying:
     "region": "us-west-2",
     "bucket_name": "oarc-ws-image-processing-pipeline",
     "endpoint_name": "oarc-ws-sam3-endpoint",
+    "bedrock_model_id": "us.anthropic.claude-opus-5-5",
     ...
   }
 }
@@ -101,7 +102,7 @@ S3 Upload → EventBridge → Step Functions → SageMaker (async) → Lambda �
 3. SageMaker processes images with SAM3, writes comparison to S3 `compared/`
 4. SageMaker writes output to S3 `async-out/` → triggers EventBridge again
 5. Step Functions invokes Lambda processor
-6. Lambda reads comparison image, calls Bedrock Claude for analysis
+6. Lambda reads the before, after, and comparison images, calls Bedrock Claude for analysis
 7. Lambda generates styled markdown report, saves to S3 `markdown/`
 
 ## Cost Protection
@@ -125,6 +126,6 @@ python scripts/deploy_endpoint.py status
 | Lambda | Post-processing (Bedrock + report generation) |
 | Step Functions | Workflow orchestration |
 | SageMaker | ML inference (SAM3 async endpoint) |
-| Bedrock | LLM analysis (Claude Opus 4.5) |
+| Bedrock | LLM analysis (Claude Opus 5.5) |
 | EventBridge | S3 event routing + scheduled cleanup |
 | CloudWatch | Endpoint monitoring + auto-shutdown alarm |
