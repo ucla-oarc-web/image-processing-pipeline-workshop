@@ -1,8 +1,12 @@
 """SageMaker Endpoint Monitor Lambda.
 
-Invoked on an EventBridge schedule. If the SageMaker endpoint
-exists, is InService, is older than IDLE_MINUTES, and has processed no
-invocations in the last IDLE_MINUTES, it deletes the endpoint to stop costs.
+Triggered by:
+  1. A CloudWatch alarm when the endpoint has zero invocations for 1 hour.
+  2. A daily EventBridge rule (2 AM UTC) as a safety net.
+
+If the SageMaker endpoint exists, is InService, is older than IDLE_MINUTES,
+and has processed no invocations in the last IDLE_MINUTES, it deletes the
+endpoint to stop costs.
 
 Estimated cost of a running ml.g4dn.xlarge endpoint: ~$0.736/hour (~$530/month).
 """
