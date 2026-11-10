@@ -115,20 +115,59 @@ def predict_fn(input_data, model_dict):
     compared_image = before_image.copy()
     draw = ImageDraw.Draw(compared_image)
 
-    # Find surviving vs destroyed houses
+    # Find surviving vs destroyed houses. A house "survived" if a box in the
+    # after image overlaps its before box by more than 50% (IoU).
+    detections = []
     for before_box in before_boxes:
         house_survived = any(_calculate_overlap(before_box, after_box) > 0.5 for after_box in after_boxes)
         color = "green" if house_survived else "red"
         draw.rectangle(before_box, outline=color, width=3)
+        detections.append({
+            "id": len(detections) + 1,
+            "bbox": list(before_box),
+            "label": "survived" if house_survived else "burned",
+        })
 
     # Save compared image to specified S3 location
     _save_image_to_s3(compared_image, compared_output_uri)
+
+    # Save the detections next to the compared image
+    image_id = _image_id(before_uri)
+    width, height = before_image.size
+    detection = {
+        "image_id": image_id,
+        "image_width": width,
+        "image_height": height,
+        "gsd_m": input_data.get("input", {}).get("gsd_m"),  # meters per pixel, if given in the input JSON
+        "detections": detections,
+    }
+    detection_uri = f"{compared_output_uri.rsplit('/', 1)[0]}/{image_id}-detections.json"
+    _save_json_to_s3(detection, detection_uri)
 
     return {
         "compare": compared_output_uri,
         "before": before_uri,
         "after": after_uri,
+        "detection_file": detection_uri,
+        "detection": detection,
     }
+
+
+def _image_id(before_uri):
+    """Image ID from the before image name, e.g. s3://bucket/images/1-before.png -> 1"""
+    name = before_uri.rsplit('/', 1)[-1].rsplit('.', 1)[0]
+    return name.replace("-before", "").replace("_before", "")
+
+
+def _save_json_to_s3(data, s3_uri):
+    """Write a dict as JSON to S3"""
+    bucket, key = _parse_s3_uri(s3_uri, "output URI")
+    boto3.client('s3').put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(data, indent=2).encode(),
+        ContentType='application/json'
+    )
 
 
 def _calculate_overlap(box1, box2):
