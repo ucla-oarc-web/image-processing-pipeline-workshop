@@ -140,6 +140,8 @@ class PipelineStack(cdk.Stack):
                 "after_image.$": "States.Format('s3://{}/images/{}', $.detail.bucket.name, $.s3Object.ParsedBody.after)",
                 "compared_output.$": "States.Format('s3://{}/compared/{}', $.detail.bucket.name, $.s3Object.ParsedBody.compared_output)",
                 "text": "house, building, roof",
+                # The original input JSON, so optional fields (e.g. gsd_m) reach the model
+                "input.$": "$.s3Object.ParsedBody",
                 "payloadKey.$": "States.Format('payload/{}.json', States.UUID())",
             },
         )
