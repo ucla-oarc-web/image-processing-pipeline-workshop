@@ -34,6 +34,8 @@ class PipelineStack(cdk.Stack):
         prefix = self.node.try_get_context("resource_prefix")
         endpoint_name = self.node.try_get_context("endpoint_name")
         bedrock_model_id = self.node.try_get_context("bedrock_model_id")
+        instance_type = self.node.try_get_context("instance_type")
+        price_per_hour = self.node.try_get_context("instance_price_per_hour")
         bucket_name = bucket.bucket_name
 
         # -----------------------------------------------------------
@@ -260,7 +262,7 @@ class PipelineStack(cdk.Stack):
                 variant_name="primary",
                 model_name=sm_model.attr_model_name,
                 initial_instance_count=1,
-                instance_type="ml.g4dn.xlarge",
+                instance_type=instance_type,
             )],
             async_inference_config=sagemaker.CfnEndpointConfig.AsyncInferenceConfigProperty(
                 output_config=sagemaker.CfnEndpointConfig.AsyncInferenceOutputConfigProperty(
@@ -281,5 +283,6 @@ class PipelineStack(cdk.Stack):
         cdk.CfnOutput(self, "EndpointName", value=endpoint_name)
         cdk.CfnOutput(self, "EndpointConfigName", value=sm_endpoint_config.attr_endpoint_config_name)
         cdk.CfnOutput(self, "CostWarning",
-                       value="WARNING: SageMaker endpoint costs ~$0.736/hr (~$530/month). "
+                       value=f"WARNING: SageMaker {instance_type} costs ~${price_per_hour}/hr "
+                             f"(~${price_per_hour * 720:.0f}/month). "
                              "Auto-shutdown after 1hr inactivity. Daily cleanup at 2AM UTC.")

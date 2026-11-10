@@ -15,6 +15,9 @@ STORAGE_STACK_NAME = "OarcWsStorageStack"
 RESOURCE_PREFIX = _CTX["resource_prefix"]
 TAGS = [{"Key": k, "Value": v} for k, v in _CTX.get("tags", {}).items()]
 
+INSTANCE_TYPE = _CTX["instance_type"]
+PRICE_PER_HOUR = _CTX["instance_price_per_hour"]  # on-demand price in REGION
+
 
 def get_bucket_name() -> str:
     """Bucket name from the storage stack output (falls back to cdk.json)."""

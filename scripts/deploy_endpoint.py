@@ -1,7 +1,7 @@
 """SageMaker Endpoint Deployment Script.
 
 Manages the SageMaker endpoint lifecycle independently from the CDK stack.
-The endpoint is the most expensive resource (~$0.736/hr for ml.g4dn.xlarge)
+The endpoint is the most expensive resource (see PRICE_PER_HOUR in config.py)
 so it is created and deleted on demand rather than as part of the stack.
 
 Usage:
@@ -16,9 +16,8 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
-from config import REGION, ENDPOINT_NAME, STACK_NAME, TAGS, RESOURCE_PREFIX
-
-INSTANCE_TYPE = "ml.g4dn.xlarge"
+from config import (REGION, ENDPOINT_NAME, STACK_NAME, TAGS, RESOURCE_PREFIX, INSTANCE_TYPE,
+                    PRICE_PER_HOUR)
 
 
 def get_stack_outputs(stack_name: str, region: str) -> dict:
@@ -39,7 +38,7 @@ def create_endpoint(endpoint_name: str):
     print(f"\n{'='*60}")
     print(f"  WARNING: This will create a SageMaker endpoint")
     print(f"  Instance type: {INSTANCE_TYPE}")
-    print(f"  Estimated cost: ~$0.736/hour (~$17.66/day)")
+    print(f"  Estimated cost: ~${PRICE_PER_HOUR}/hour (~${PRICE_PER_HOUR * 24:.2f}/day)")
     print(f"  Auto-shutdown: enabled after 1 hour of inactivity")
     print(f"{'='*60}\n")
 
@@ -154,7 +153,7 @@ def check_status():
             now = datetime.now(timezone.utc)
             hours = (now - creation_time).total_seconds() / 3600
             print(f"\nRuntime:  {hours:.2f} hours")
-            print(f"Cost:     ${hours * 0.736:.2f}")
+            print(f"Cost:     ${hours * PRICE_PER_HOUR:.2f}")
 
             try:
                 metric_response = cw.get_metric_statistics(
@@ -202,7 +201,7 @@ def check_status():
             except Exception as e:
                 print(f"\nAuto-shutdown alarm: Unable to check ({e})")
 
-            print("\nWARNING: Endpoint is running and incurring costs (~$0.736/hr).")
+            print(f"\nWARNING: Endpoint is running and incurring costs (~${PRICE_PER_HOUR}/hr).")
             print("Run 'python scripts/deploy_endpoint.py delete' to stop it.")
     except ClientError:
         print(f"Endpoint '{ENDPOINT_NAME}' does not exist (not running, no cost).")
