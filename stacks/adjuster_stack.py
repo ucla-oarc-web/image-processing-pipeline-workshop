@@ -62,7 +62,7 @@ class OarcWsAdjusterStack(cdk.Stack):
             )
         )
 
-        # EventBridge rule for compared/ prefix (not S3 notifications)
+        # EventBridge rule for comparison images in compared/ (not the detections JSON)
         events.Rule(
             self,
             "ComparedObjectCreatedRule",
@@ -72,7 +72,7 @@ class OarcWsAdjusterStack(cdk.Stack):
                 detail_type=["Object Created"],
                 detail={
                     "bucket": {"name": [bucket.bucket_name]},
-                    "object": {"key": [{"wildcard": "compared/*"}]},
+                    "object": {"key": [{"wildcard": "compared/*.png"}]},
                 },
             ),
             targets=[events_targets.LambdaFunction(
