@@ -3,7 +3,7 @@
 This Lambda is invoked by Step Functions after SageMaker async inference
 completes. It:
   1. Reads the SageMaker output JSON from S3 (contains image URIs)
-  2. Sends the comparison image to Bedrock Claude for analysis
+  2. Sends the before, after, and comparison images to Bedrock Claude for analysis
   3. Generates a styled markdown report with before/after/compared images
   4. Saves the report to S3 (markdown/ prefix)
 
@@ -11,24 +11,26 @@ Environment variables (set by CDK):
   BUCKET_NAME       - S3 bucket for all pipeline data
   BEDROCK_MODEL_ID  - Bedrock model identifier for Claude
 """
-import json
-import os
-import logging
 import base64
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from io import BytesIO
 
 import boto3
+from anthropic import AnthropicBedrock
 from botocore.exceptions import ClientError
 from PIL import Image
-from io import BytesIO
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3_client = boto3.client("s3")
-bedrock_client = boto3.client("bedrock-runtime")
+claude = AnthropicBedrock()  # region and credentials come from the Lambda environment
 
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "oarc-image-processing-pipeline")
-BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0")
+BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
+MAX_TOKENS = 16000  # includes Claude's thinking, so leave plenty of room
 
 
 # ---------------------------------------------------------------------------
@@ -61,62 +63,53 @@ def save_text_to_s3(text, bucket, key):
 # Image helpers
 # ---------------------------------------------------------------------------
 
-def resize_image(image_bytes, max_size_bytes=3_900_000):
-    """Resize an image to fit within the Bedrock API size limit (5MB after base64 encoding)."""
-    if len(image_bytes) <= max_size_bytes:
-        return image_bytes
-
-    img = Image.open(BytesIO(image_bytes))
-
-    # Try JPEG at decreasing quality
-    for quality in (85, 70, 50, 30):
-        buf = BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=quality)
-        if len(buf.getvalue()) <= max_size_bytes:
-            return buf.getvalue()
-
-    # Scale down until it fits
-    while True:
-        width, height = img.size
-        img = img.resize((int(width * 0.8), int(height * 0.8)), Image.Resampling.LANCZOS)
-        buf = BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=70)
-        if len(buf.getvalue()) <= max_size_bytes:
-            return buf.getvalue()
+def to_jpeg(image_bytes, max_edge, quality=85):
+    """Downscale so the longest edge is at most max_edge pixels and encode as JPEG."""
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
 # Bedrock
 # ---------------------------------------------------------------------------
 
-def call_bedrock(compare_bytes, prompt):
-    """Send the comparison image to Bedrock Claude for analysis."""
-    resized_bytes = resize_image(compare_bytes)
-    media_type = "image/jpeg" if resized_bytes[0:2] == b'\xff\xd8' else "image/png"
+def call_bedrock(images, prompt):
+    """Send the labeled images plus the prompt to Claude on Bedrock and return its text answer.
 
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4096,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": base64.b64encode(resized_bytes).decode(),
-                }},
-            ],
-        }],
-    }
+    images: list of (label, image_bytes) tuples, sent in order.
+    """
+    content = []
+    for label, image_bytes in images:
+        content.append({"type": "text", "text": f"Image: {label}"})
+        content.append({"type": "image", "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.b64encode(to_jpeg(image_bytes, max_edge=2000)).decode(),
+        }})
+    content.append({"type": "text", "text": prompt})
 
-    response = bedrock_client.invoke_model(modelId=BEDROCK_MODEL_ID, body=json.dumps(payload))
-    body = json.loads(response["body"].read())
+    # Stream so long thinking doesn't hit HTTP timeouts
+    with claude.messages.stream(
+        model=BEDROCK_MODEL_ID,
+        max_tokens=MAX_TOKENS,
+        output_config={"effort": "medium"},
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        message = stream.get_final_message()
+    logger.info("Claude responded (stop_reason=%s, usage=%s)", message.stop_reason, message.usage)
 
-    for item in body.get("content", []):
-        if item.get("type") == "text":
-            return item["text"]
-    return json.dumps(body)
+    # Check why Claude stopped before using its answer
+    if message.stop_reason == "refusal":
+        raise RuntimeError(f"Claude declined the request: {message.stop_details}")
+    text = "".join(b.text for b in message.content if b.type == "text").strip()
+    if not text:
+        raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
+    if message.stop_reason == "max_tokens":
+        text += "\n\n_(Analysis truncated: the model reached its output limit.)_"
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +118,17 @@ def call_bedrock(compare_bytes, prompt):
 
 def process_sam3_analysis(bucket, key):
     """Read SageMaker output, call Bedrock, and save LLM analysis to S3."""
-    from datetime import datetime, timezone
-
     sam3_output = load_json_from_s3(bucket, key)
-    prompt = open(os.path.join(os.path.dirname(__file__), "prompt.txt")).read()
+    with open(os.path.join(os.path.dirname(__file__), "prompt.txt")) as f:
+        prompt = f.read()
 
-    compare_bytes = load_s3_binary(sam3_output["compare"])
-    llm_result = call_bedrock(compare_bytes, prompt)
+    images = [
+        ("1) before the fire", load_s3_binary(sam3_output["before"])),
+        ("2) after the fire", load_s3_binary(sam3_output["after"])),
+        ("3) before-fire photo, burned homes outlined in red, surviving homes in green",
+         load_s3_binary(sam3_output["compare"])),
+    ]
+    llm_result = call_bedrock(images, prompt)
 
     # Extract descriptive name from before image filename (e.g., "1-before.png" -> "1")
     before_image = sam3_output.get("before", "")
@@ -154,14 +151,13 @@ def process_sam3_analysis(bucket, key):
         "after": sam3_output["after"],
         "compared": sam3_output["compare"],
         "llm_output": llm_uri,
+        "llm_text": llm_result,
         "base_name": base_name,
     }
 
 
-def generate_markdown_report(data, base_name):
+def generate_markdown_report(llm_text, base_name):
     """Generate a styled markdown/HTML report with embedded image references."""
-    llm_text = load_s3_binary(data["llm_output"]).decode()
-
     return f"""# Palisades Fire Analysis Report
 
 ## Before and After Images
@@ -240,34 +236,13 @@ _End of Report_
 
 def save_markdown_to_s3(markdown_content, bucket, base_name, image_uris):
     """Save the markdown report with embedded base64 images to S3."""
-    # Load and resize images to embed in markdown
-    embedded_images = {}
-    target_sizes = {"before": 300, "after": 300, "compared": 600}
+    target_widths = {"before": 300, "after": 300, "compared": 600}
 
+    # Replace image src placeholders with small embedded JPEG data URIs
     for img_type, s3_uri in image_uris.items():
-        if s3_uri.startswith("s3://"):
-            img_bytes = load_s3_binary(s3_uri)
-            img = Image.open(BytesIO(img_bytes))
-
-            # Resize to smaller dimensions
-            max_width = target_sizes.get(img_type, 400)
-            if img.width > max_width:
-                ratio = max_width / img.width
-                new_size = (max_width, int(img.height * ratio))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-
-            # Convert to JPEG with compression for smaller file size
-            buffer = BytesIO()
-            img.convert("RGB").save(buffer, format="JPEG", quality=75, optimize=True)
-            b64_data = base64.b64encode(buffer.getvalue()).decode()
-            embedded_images[img_type] = f"data:image/jpeg;base64,{b64_data}"
-
-    # Replace image src with base64 data URIs
-    for img_type, data_uri in embedded_images.items():
-        markdown_content = markdown_content.replace(
-            f'{img_type}_image_{base_name}.png',
-            data_uri
-        )
+        jpeg = to_jpeg(load_s3_binary(s3_uri), max_edge=target_widths[img_type], quality=75)
+        data_uri = f"data:image/jpeg;base64,{base64.b64encode(jpeg).decode()}"
+        markdown_content = markdown_content.replace(f"{img_type}_image_{base_name}.png", data_uri)
 
     markdown_key = f"markdown/{base_name}.md"
     s3_client.put_object(
@@ -294,7 +269,7 @@ def lambda_handler(event, _context):
     analysis_result = process_sam3_analysis(bucket, key)
 
     # Step 2: Generate styled markdown report
-    markdown_content = generate_markdown_report(analysis_result, analysis_result["base_name"])
+    markdown_content = generate_markdown_report(analysis_result["llm_text"], analysis_result["base_name"])
 
     # Step 3: Save report and images to S3
     image_uris = {

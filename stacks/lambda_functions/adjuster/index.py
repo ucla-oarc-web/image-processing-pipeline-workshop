@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
+from anthropic import AnthropicBedrock
 from botocore.exceptions import ClientError
 
 try:
@@ -23,13 +24,11 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3 = boto3.client("s3")
-from botocore.config import Config
-
-bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=600))
+claude = AnthropicBedrock()  # region and credentials come from the Lambda environment
 dynamodb = boto3.resource("dynamodb")
 
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-20250514-v1:0")
+MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
 ROUTING_TABLE_NAME = os.environ["ROUTING_TABLE_NAME"]
 
 table = dynamodb.Table(ROUTING_TABLE_NAME)
@@ -135,39 +134,32 @@ def _invoke_bedrock(image_bytes: bytes, image_key: str, prompt_text: str) -> Dic
     image_bytes = _resize_image(image_bytes)
     media_type = "image/jpeg" if image_bytes[0:2] == b'\xff\xd8' else "image/png"
 
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 32000,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": base64.b64encode(image_bytes).decode("utf-8"),
-                        },
-                    },
-                ],
-            }
-        ],
-    }
-
-    logger.info("Calling Bedrock (max_tokens=32000, image_size=%d bytes)", len(image_bytes))
-    response = bedrock.invoke_model(modelId=MODEL_ID, body=json.dumps(payload))
-    body = json.loads(response["body"].read())
-    stop_reason = str(body.get("stop_reason", "unknown"))
-    logger.info("Bedrock responded (stop_reason=%s)", stop_reason)
-
-    text_chunks = [
-        item.get("text", "")
-        for item in body.get("content", [])
-        if item.get("type") == "text"
+    content = [
+        {"type": "text", "text": prompt_text},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+            },
+        },
     ]
-    model_text = "\n".join(text_chunks).strip()
+
+    logger.info("Calling Claude (max_tokens=32000, image_size=%d bytes)", len(image_bytes))
+    # Stream so long thinking doesn't hit HTTP timeouts
+    with claude.messages.stream(
+        model=MODEL_ID,
+        max_tokens=32000,
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        message = stream.get_final_message()
+    stop_reason = message.stop_reason
+    logger.info("Claude responded (stop_reason=%s, usage=%s)", stop_reason, message.usage)
+
+    if stop_reason == "refusal":
+        raise RuntimeError(f"Claude declined the request: {message.stop_details}")
+    model_text = "".join(b.text for b in message.content if b.type == "text").strip()
     cleaned = model_text.replace("```json", "").replace("```", "").strip()
 
     try:

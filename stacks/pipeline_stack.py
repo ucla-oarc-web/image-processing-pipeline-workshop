@@ -34,6 +34,9 @@ class PipelineStack(cdk.Stack):
         prefix = self.node.try_get_context("resource_prefix")
         endpoint_name = self.node.try_get_context("endpoint_name")
         bedrock_model_id = self.node.try_get_context("bedrock_model_id")
+        instance_type = self.node.try_get_context("instance_type")
+        price_per_hour = self.node.try_get_context("instance_price_per_hour")
+        idle_minutes = self.node.try_get_context("idle_shutdown_minutes")
         bucket_name = bucket.bucket_name
 
         # -----------------------------------------------------------
@@ -47,7 +50,8 @@ class PipelineStack(cdk.Stack):
                 platform=cdk.aws_ecr_assets.Platform.LINUX_AMD64,
             ),
             memory_size=512,
-            timeout=cdk.Duration.minutes(3),
+            # Claude thinks before answering; leave room for long analyses
+            timeout=cdk.Duration.minutes(10),
             environment={
                 "BUCKET_NAME": bucket_name,
                 "BEDROCK_MODEL_ID": bedrock_model_id,
@@ -55,7 +59,7 @@ class PipelineStack(cdk.Stack):
         )
         bucket.grant_read_write(processor)
         processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["bedrock:InvokeModel"],
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
             resources=[
                 f"arn:{self.partition}:bedrock:*::foundation-model/{bedrock_model_id}",
                 f"arn:{self.partition}:bedrock:*::foundation-model/{bedrock_model_id.removeprefix('us.')}",
@@ -77,11 +81,16 @@ class PipelineStack(cdk.Stack):
             ),
             memory_size=128,
             timeout=cdk.Duration.minutes(5),
-            environment={"SAGEMAKER_ENDPOINT_NAME": endpoint_name},
+            environment={"SAGEMAKER_ENDPOINT_NAME": endpoint_name, "IDLE_MINUTES": str(idle_minutes)},
         )
         monitor.add_to_role_policy(iam.PolicyStatement(
             actions=["sagemaker:DescribeEndpoint", "sagemaker:DeleteEndpoint"],
             resources=[endpoint_arn],
+        ))
+
+        monitor.add_to_role_policy(iam.PolicyStatement(
+            actions=["cloudwatch:GetMetricStatistics"],  # does not support resource scoping
+            resources=["*"],
         ))
 
         # CloudWatch Alarm - triggers when zero invocations for 1 hour
@@ -131,6 +140,8 @@ class PipelineStack(cdk.Stack):
                 "after_image.$": "States.Format('s3://{}/images/{}', $.detail.bucket.name, $.s3Object.ParsedBody.after)",
                 "compared_output.$": "States.Format('s3://{}/compared/{}', $.detail.bucket.name, $.s3Object.ParsedBody.compared_output)",
                 "text": "house, building, roof",
+                # The original input JSON, so optional fields (e.g. gsd_m) reach the model
+                "input.$": "$.s3Object.ParsedBody",
                 "payloadKey.$": "States.Format('payload/{}.json', States.UUID())",
             },
         )
@@ -259,7 +270,7 @@ class PipelineStack(cdk.Stack):
                 variant_name="primary",
                 model_name=sm_model.attr_model_name,
                 initial_instance_count=1,
-                instance_type="ml.g4dn.xlarge",
+                instance_type=instance_type,
             )],
             async_inference_config=sagemaker.CfnEndpointConfig.AsyncInferenceConfigProperty(
                 output_config=sagemaker.CfnEndpointConfig.AsyncInferenceOutputConfigProperty(
@@ -272,7 +283,6 @@ class PipelineStack(cdk.Stack):
             ),
             tags=tags,
         )
-        sm_endpoint_config.add_dependency(sm_model)
 
         # -----------------------------------------------------------
         # Outputs
@@ -281,5 +291,6 @@ class PipelineStack(cdk.Stack):
         cdk.CfnOutput(self, "EndpointName", value=endpoint_name)
         cdk.CfnOutput(self, "EndpointConfigName", value=sm_endpoint_config.attr_endpoint_config_name)
         cdk.CfnOutput(self, "CostWarning",
-                       value="WARNING: SageMaker endpoint costs ~$0.736/hr (~$530/month). "
+                       value=f"WARNING: SageMaker {instance_type} costs ~${price_per_hour}/hr "
+                             f"(~${price_per_hour * 720:.0f}/month). "
                              "Auto-shutdown after 1hr inactivity. Daily cleanup at 2AM UTC.")

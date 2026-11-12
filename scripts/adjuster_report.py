@@ -14,7 +14,7 @@ from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 
-from config import REGION, BUCKET_NAME
+from config import REGION, get_bucket_name
 
 ADJUSTER_STACK = "OarcWsAdjusterStack"
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -103,13 +103,14 @@ def print_routing_table():
 def sync_reports():
     """Download pipeline reports and adjuster artifacts from S3."""
     s3 = boto3.client("s3", region_name=REGION)
+    bucket = get_bucket_name()
     os.makedirs(PIPELINE_DIR, exist_ok=True)
     os.makedirs(ADJUSTER_DIR, exist_ok=True)
 
     # Pipeline markdown reports
     count = 0
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix="markdown/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix="markdown/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             filename = key.split("/")[-1]
@@ -117,14 +118,14 @@ def sync_reports():
                 continue
             dest = os.path.join(PIPELINE_DIR, filename)
             if not os.path.exists(dest):
-                s3.download_file(BUCKET_NAME, key, dest)
+                s3.download_file(bucket, key, dest)
                 print(f"  Downloaded: {filename}")
                 count += 1
     print(f"  Pipeline reports: {count} new file(s) synced to {PIPELINE_DIR}")
 
     # Adjuster artifacts (annotated images + crops)
     count = 0
-    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix="routing-artifacts/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix="routing-artifacts/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             rel_path = key[len("routing-artifacts/"):]
@@ -133,7 +134,7 @@ def sync_reports():
             dest = os.path.join(ADJUSTER_DIR, rel_path)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             if not os.path.exists(dest):
-                s3.download_file(BUCKET_NAME, key, dest)
+                s3.download_file(bucket, key, dest)
                 count += 1
     print(f"  Adjuster artifacts: {count} new file(s) synced to {ADJUSTER_DIR}")
 

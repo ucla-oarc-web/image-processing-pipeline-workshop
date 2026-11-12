@@ -1,1 +1,2 @@
-Pillow>=10.4.0,<12.0.0
+anthropic[bedrock]==2.7.0
+Pillow>=12.0.0,<14.0.0
