@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import json
 import io
@@ -111,6 +112,11 @@ def predict_fn(input_data, model_dict):
     before_boxes = _process_image(before_image, input_data, model_dict)
     after_boxes = _process_image(after_image, input_data, model_dict)
 
+    # The before and after photos are not always framed identically. Shift the
+    # after boxes onto the before image so the same house lines up in both.
+    dx, dy = _estimate_shift(before_image, after_image)
+    after_boxes = [(x1 + dx, y1 + dy, x2 + dx, y2 + dy) for x1, y1, x2, y2 in after_boxes]
+
     # Compare masks and draw outlines
     compared_image = before_image.copy()
     draw = ImageDraw.Draw(compared_image)
@@ -151,6 +157,35 @@ def predict_fn(input_data, model_dict):
         "detection_file": detection_uri,
         "detection": detection,
     }
+
+
+def _estimate_shift(before_image, after_image, max_shift=200):
+    """Pixel offset (dx, dy) that moves the after image onto the before image.
+
+    Uses phase correlation: the peak of the normalized cross-power spectrum
+    marks the shift between two images of the same scene. Handles shifts only
+    (not rotation or zoom). Returns (0, 0) if the result is implausibly large.
+    """
+    width = min(before_image.width, after_image.width)
+    height = min(before_image.height, after_image.height)
+    before = np.asarray(before_image.convert("L").crop((0, 0, width, height)), dtype=np.float32)
+    after = np.asarray(after_image.convert("L").crop((0, 0, width, height)), dtype=np.float32)
+    before -= before.mean()
+    after -= after.mean()
+
+    cross_power = np.fft.fft2(before) * np.conj(np.fft.fft2(after))
+    correlation = np.abs(np.fft.ifft2(cross_power / (np.abs(cross_power) + 1e-9)))
+    peak_y, peak_x = np.unravel_index(correlation.argmax(), correlation.shape)
+
+    # Peaks past the halfway point are negative shifts (the FFT wraps around)
+    dy = int(peak_y if peak_y < height / 2 else peak_y - height)
+    dx = int(peak_x if peak_x < width / 2 else peak_x - width)
+
+    if abs(dx) > max_shift or abs(dy) > max_shift:
+        print(f"Alignment shift ({dx}, {dy}) too large; comparing without alignment")
+        return 0, 0
+    print(f"Aligned after image by dx={dx}, dy={dy} pixels")
+    return dx, dy
 
 
 def _image_id(before_uri):
