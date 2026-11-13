@@ -163,6 +163,7 @@ def predict_fn(input_data, model_dict):
         "after": after_uri,
         "detection_file": detection_uri,
         "detection": detection,
+        "input": input_data.get("input", {}),  # the original input JSON, for optional fields like geo_bbox
     }
 
 
