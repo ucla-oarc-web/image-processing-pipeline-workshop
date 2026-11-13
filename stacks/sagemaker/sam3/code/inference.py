@@ -3,7 +3,7 @@ import torch
 import json
 import io
 import boto3
-from PIL import Image, ImageDraw
+from PIL import Image, ImageFilter
 from transformers import Sam3Model, Sam3Processor
 
 def _parse_s3_uri(s3_uri, field_name):
@@ -54,7 +54,8 @@ def input_fn(request_body, request_content_type):
         raise ValueError(f"Unsupported content type: {request_content_type}")
 
 def _process_image(image, input_data, model_dict):
-    """Segment one image and return a bounding box (x_min, y_min, x_max, y_max) per detected object"""
+    """Segment one image and return (boxes, masks): a bounding box (x_min, y_min, x_max, y_max)
+    and a boolean pixel mask per detected object"""
     device = model_dict["device"]
     text_prompt = input_data["text"]
     model = model_dict["model"]
@@ -72,14 +73,21 @@ def _process_image(image, input_data, model_dict):
         target_sizes=inputs.get("original_sizes").tolist()
     )[0]
 
-    boxes = []
+    boxes, masks = [], []
     for mask in results.get("masks", []):
         y_coords, x_coords = torch.nonzero(mask, as_tuple=True)
         if len(x_coords) == 0:
             continue
         boxes.append((int(x_coords.min()), int(y_coords.min()), int(x_coords.max()), int(y_coords.max())))
+        masks.append(mask.bool().cpu().numpy())
 
-    return boxes
+    return boxes, masks
+
+def _draw_outline(image, mask, color, width=3):
+    """Trace the edge of a mask onto the image in the given color"""
+    mask_image = Image.fromarray(mask.astype(np.uint8) * 255)
+    edge = mask_image.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.MaxFilter(width))
+    image.paste(color, mask=edge)
 
 def _save_image_to_s3(image, s3_uri):
     """Helper to save image to S3"""
@@ -109,25 +117,24 @@ def predict_fn(input_data, model_dict):
     after_image = input_data["after_image_data"]
 
     # Process both images
-    before_boxes = _process_image(before_image, input_data, model_dict)
-    after_boxes = _process_image(after_image, input_data, model_dict)
+    before_boxes, before_masks = _process_image(before_image, input_data, model_dict)
+    after_boxes, _ = _process_image(after_image, input_data, model_dict)
 
     # The before and after photos are not always framed identically. Shift the
     # after boxes onto the before image so the same house lines up in both.
     dx, dy = _estimate_shift(before_image, after_image)
     after_boxes = [(x1 + dx, y1 + dy, x2 + dx, y2 + dy) for x1, y1, x2, y2 in after_boxes]
 
-    # Compare masks and draw outlines
+    # Compare boxes and outline each house's shape
     compared_image = before_image.copy()
-    draw = ImageDraw.Draw(compared_image)
 
     # Find surviving vs destroyed houses. A house "survived" if a box in the
     # after image overlaps its before box by more than 50% (IoU).
     detections = []
-    for before_box in before_boxes:
+    for before_box, before_mask in zip(before_boxes, before_masks):
         house_survived = any(_calculate_overlap(before_box, after_box) > 0.5 for after_box in after_boxes)
         color = "green" if house_survived else "red"
-        draw.rectangle(before_box, outline=color, width=3)
+        _draw_outline(compared_image, before_mask, color)
         detections.append({
             "id": len(detections) + 1,
             "bbox": list(before_box),
