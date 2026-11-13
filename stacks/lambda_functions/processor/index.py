@@ -3,7 +3,8 @@
 This Lambda is invoked by Step Functions after SageMaker async inference
 completes. It:
   1. Reads the SageMaker output JSON from S3 (contains image URIs)
-  2. Sends the before, after, and comparison images to Bedrock Claude for analysis
+  2. Sends the before, after and outlined images, area metadata and optional CAL FIRE
+     data to Claude on Bedrock, which can call the tools in tools.py
   3. Generates a styled markdown report with before/after/compared images
   4. Saves the report to S3 (markdown/ prefix)
 
@@ -15,6 +16,9 @@ import base64
 import json
 import logging
 import os
+import urllib.parse
+import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
 
@@ -23,6 +27,8 @@ from anthropic import AnthropicBedrock
 from botocore.exceptions import ClientError
 from PIL import Image
 
+from tools import TOOLS
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -30,7 +36,15 @@ s3_client = boto3.client("s3")
 claude = AnthropicBedrock()  # region and credentials come from the Lambda environment
 
 BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
-MAX_TOKENS = 16000  # includes Claude's thinking, so leave plenty of room
+MAX_TOKENS = 16000  # per response, including Claude's thinking
+MAX_TURNS = 8  # cap on Claude <-> tool round trips, so one image can't run up the bill
+# Image tokens grow with pixel area (about 1 token per 28x28 pixels): 1280 px is about 1,600 tokens
+# per image instead of about 3,200 at full size. Raise it if Claude needs finer detail.
+IMAGE_MAX_EDGE = 1280
+
+# Claude Opus 5.5 list prices in USD per million tokens, for the cost estimate in the logs.
+# Check Amazon Bedrock pricing for your region; update these if they differ.
+PRICE_PER_MTOK = {"input": 4.00, "cache_write": 5.00, "cache_read": 0.20, "output": 20.00}
 
 
 # ---------------------------------------------------------------------------
@@ -73,43 +87,138 @@ def to_jpeg(image_bytes, max_edge, quality=85):
 
 
 # ---------------------------------------------------------------------------
+# CAL FIRE damage inspection (DINS) data
+# ---------------------------------------------------------------------------
+
+# Public CAL FIRE DINS feature service (statewide, one record per inspected structure)
+DINS_URL = ("https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/"
+            "POSTFIRE_MASTER_DATA_SHARE/FeatureServer/0/query")
+# Construction details only. DAMAGE is left out on purpose: SAM3 decides what burned.
+DINS_FIELDS = ["INCIDENTNAME", "STRUCTURETYPE", "YEARBUILT", "ROOFCONSTRUCTION", "EAVES", "VENTSCREEN",
+               "EXTERIORSIDING", "WINDOWPANE", "DECKPORCHELEVATED", "FENCEATTACHEDTOSTRUCTURE"]
+
+
+def get_calfire_context(bucket, geo_bbox):
+    """Summarize how homes inside geo_bbox [min_lon, min_lat, max_lon, max_lat] were built.
+
+    Records are cached in S3 so repeated runs don't hit the CAL FIRE API again.
+    Returns "" when no geo_bbox is given.
+    """
+    if not geo_bbox:
+        return ""
+    cache_key = "calfire-cache/" + "_".join(f"{v:.5f}" for v in geo_bbox) + ".json"
+    try:
+        records = json.loads(s3_client.get_object(Bucket=bucket, Key=cache_key)["Body"].read())
+        logger.info("Using cached CAL FIRE data s3://%s/%s", bucket, cache_key)
+    except s3_client.exceptions.NoSuchKey:
+        params = {
+            "where": "1=1",  # every inspected structure in the area, whichever fire it was inspected after
+            "geometry": ",".join(str(v) for v in geo_bbox),
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": ",".join(DINS_FIELDS),
+            "returnGeometry": "false",
+            "f": "json",
+        }
+        with urllib.request.urlopen(f"{DINS_URL}?{urllib.parse.urlencode(params)}", timeout=30) as resp:
+            records = [f["attributes"] for f in json.load(resp).get("features", [])]
+        s3_client.put_object(Bucket=bucket, Key=cache_key, Body=json.dumps(records).encode(),
+                             ContentType="application/json")
+        logger.info("Fetched %d CAL FIRE records, cached at s3://%s/%s", len(records), bucket, cache_key)
+
+    if not records:
+        return ""
+    lines = [f"CAL FIRE inspection data: how the {len(records)} structures in this area were built "
+             "(counts per value; burn outcomes are not included):"]
+    for field in DINS_FIELDS:
+        counts = Counter(str(r.get(field) or "Unknown") for r in records)
+        if field == "YEARBUILT":
+            counts = Counter("Unknown" if y == "Unknown" else f"{y[:3]}0s" for y in counts.elements())
+        lines.append(f"- {field}: " + ", ".join(f"{v} ({n})" for v, n in counts.most_common(6)))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Bedrock
 # ---------------------------------------------------------------------------
 
-def call_bedrock(images, prompt):
-    """Send the labeled images plus the prompt to Claude on Bedrock and return its text answer.
+def call_bedrock(content):
+    """Send the labeled inputs to Claude on Bedrock, let it call the tools, and return its text answer.
 
-    images: list of (label, image_bytes) tuples, sent in order.
+    content: the user message's content blocks (images, metadata, then the prompt).
+    The SDK's tool runner runs the loop: when Claude asks for a tool, the runner calls
+    the matching function in tools.py and sends the result back, until Claude is done.
     """
-    content = []
-    for label, image_bytes in images:
-        content.append({"type": "text", "text": f"Image: {label}"})
-        content.append({"type": "image", "source": {
-            "type": "base64",
-            "media_type": "image/jpeg",
-            "data": base64.b64encode(to_jpeg(image_bytes, max_edge=2000)).decode(),
-        }})
-    content.append({"type": "text", "text": prompt})
-
     # Stream so long thinking doesn't hit HTTP timeouts
-    with claude.messages.stream(
+    runner = claude.beta.messages.tool_runner(
         model=BEDROCK_MODEL_ID,
         max_tokens=MAX_TOKENS,
+        max_iterations=MAX_TURNS,
         output_config={"effort": "medium"},
+        tools=TOOLS,
         messages=[{"role": "user", "content": content}],
-    ) as stream:
+        # Every tool round trip resends the whole conversation. Automatic caching moves the cache
+        # forward each turn, so the images, prompt and earlier tool results are read from cache
+        # at a small fraction of the normal input price.
+        cache_control={"type": "ephemeral"},
+        stream=True,
+    )
+
+    # Each turn is one request; add up the tokens so we can log what the image cost
+    tokens = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+    for turn, stream in enumerate(runner, start=1):
         message = stream.get_final_message()
-    logger.info("Claude responded (stop_reason=%s, usage=%s)", message.stop_reason, message.usage)
+        usage = message.usage
+        tokens["input"] += usage.input_tokens
+        tokens["cache_write"] += usage.cache_creation_input_tokens or 0
+        tokens["cache_read"] += usage.cache_read_input_tokens or 0
+        tokens["output"] += usage.output_tokens
+    cost = sum(tokens[k] * PRICE_PER_MTOK[k] / 1_000_000 for k in tokens)
+    logger.info("Claude finished in %d turn(s), stop_reason=%s, tokens=%s, estimated cost $%.2f",
+                turn, message.stop_reason, tokens, cost)
 
     # Check why Claude stopped before using its answer
     if message.stop_reason == "refusal":
         raise RuntimeError(f"Claude declined the request: {message.stop_details}")
+    if message.stop_reason == "tool_use":
+        raise RuntimeError(f"Claude was still calling tools after {MAX_TURNS} turns; raise MAX_TURNS")
     text = "".join(b.text for b in message.content if b.type == "text").strip()
     if not text:
         raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
     if message.stop_reason == "max_tokens":
         text += "\n\n_(Analysis truncated: the model reached its output limit.)_"
     return text
+
+
+def build_area_metadata(sam3_output):
+    """Area metadata for Claude: capture dates, resolution, bounds, and SAM3's burned/survived labels."""
+    original_input = sam3_output.get("input", {})
+    detection = sam3_output.get("detection", {})
+    houses = detection.get("detections", [])
+    not_given = "not provided"
+    geo_bbox = original_input.get("geo_bbox")
+    width, height = detection.get("image_width"), detection.get("image_height")
+    if geo_bbox and width and height:
+        # Each home's center as "latitude,longitude", ready to pass to the terrain and wind tools
+        min_lon, min_lat, max_lon, max_lat = geo_bbox
+        for house in houses:
+            x_min, y_min, x_max, y_max = house["bbox"]
+            lat = max_lat - (y_min + y_max) / 2 / height * (max_lat - min_lat)  # image y runs north to south
+            lon = min_lon + (x_min + x_max) / 2 / width * (max_lon - min_lon)
+            house["center"] = f"{lat:.5f},{lon:.5f}"
+    return {
+        "before_image_capture_date": original_input.get("before_date", not_given),
+        "after_image_capture_date": original_input.get("after_date", not_given),
+        "image_size_px": [width, height],
+        "resolution_m_per_px": detection.get("gsd_m") or not_given,
+        "location_bounds": geo_bbox or not_given,
+        "location_bounds_format": "[min_longitude, min_latitude, max_longitude, max_latitude]",
+        "labels_from": "SAM3 segmentation (an earlier pipeline step)",
+        "homes_burned": sum(h["label"] == "burned" for h in houses),
+        "homes_survived": sum(h["label"] == "survived" for h in houses),
+        "homes": houses,  # id, bbox [x_min, y_min, x_max, y_max] in pixels, label, center (if geo_bbox is given)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +231,27 @@ def process_sam3_analysis(bucket, key):
     with open(os.path.join(os.path.dirname(__file__), "prompt.txt")) as f:
         prompt = f.read()
 
-    images = [
-        ("1) before the fire", load_s3_binary(sam3_output["before"])),
-        ("2) after the fire", load_s3_binary(sam3_output["after"])),
-        ("3) before-fire photo, burned homes outlined in red, surviving homes in green",
-         load_s3_binary(sam3_output["compare"])),
-    ]
-    llm_result = call_bedrock(images, prompt)
+    original_input = sam3_output.get("input", {})
+    metadata = build_area_metadata(sam3_output)
+    calfire_context = get_calfire_context(bucket, original_input.get("geo_bbox"))
+
+    # Inputs first, each labeled the way the prompt names it; the prompt goes last
+    content = []
+    for label, uri in [("Before Image", sam3_output["before"]),
+                       ("After Image", sam3_output["after"]),
+                       ("Outlined Image", sam3_output["compare"])]:
+        content.append({"type": "text", "text": f"<{label}>"})
+        content.append({"type": "image", "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.b64encode(to_jpeg(load_s3_binary(uri), max_edge=IMAGE_MAX_EDGE)).decode(),
+        }})
+    content.append({"type": "text", "text": f"<Area Metadata>\n{json.dumps(metadata, separators=(",", ":"))}\n</Area Metadata>"})
+    if calfire_context:
+        content.append({"type": "text", "text": f"<CAL FIRE Construction Data>\n{calfire_context}\n</CAL FIRE Construction Data>"})
+    content.append({"type": "text", "text": prompt})
+
+    llm_result = call_bedrock(content)
 
     # Extract descriptive name from before image filename (e.g., "1-before.png" -> "1")
     before_image = sam3_output.get("before", "")

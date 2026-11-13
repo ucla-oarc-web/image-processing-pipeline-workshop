@@ -1,2 +1,5 @@
 anthropic[bedrock]==2.7.0
 Pillow>=12.0.0,<14.0.0
+requests>=2.31.0,<3.0.0
+# The first release with AgentCore Web Search (InvokeWebSearch); newer than the Lambda image's boto3
+boto3==1.43.127
