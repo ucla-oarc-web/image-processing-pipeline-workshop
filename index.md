@@ -4,15 +4,9 @@ Welcome to the **Image Processing Pipeline Workshop** GitHub Pages site. This si
 
 ## Reports
 
-### November 2026 (Claude Opus 5.5 with wind, terrain and web search tools)
-
 - [Neighborhood 1: Pampas Ricas Blvd, Chapala Dr and Ocampo Dr](palisades-fire-1--2026-11-13-05-09-57.md)
 - [Neighborhood 2: Malibu Vista Dr, Kingsport Dr and Castlerock Rd](palisades-fire-2--2026-11-13-05-10-04.md)
 - [Neighborhood 3: Via de la Paz, Bowdoin St and Swarthmore Ave](palisades-fire-3--2026-11-13-05-09-39.md)
-
-### December 2025
-
-- [Palisades Fire Analysis Report](report_20251203011449.md)
 
 ## About
 
