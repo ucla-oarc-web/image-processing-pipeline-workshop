@@ -94,7 +94,7 @@ def to_jpeg(image_bytes, max_edge, quality=85):
 DINS_URL = ("https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/"
             "POSTFIRE_MASTER_DATA_SHARE/FeatureServer/0/query")
 # Construction details only. DAMAGE is left out on purpose: SAM3 decides what burned.
-DINS_FIELDS = ["STRUCTURETYPE", "YEARBUILT", "ROOFCONSTRUCTION", "EAVES", "VENTSCREEN",
+DINS_FIELDS = ["INCIDENTNAME", "STRUCTURETYPE", "YEARBUILT", "ROOFCONSTRUCTION", "EAVES", "VENTSCREEN",
                "EXTERIORSIDING", "WINDOWPANE", "DECKPORCHELEVATED", "FENCEATTACHEDTOSTRUCTURE"]
 
 
@@ -106,13 +106,13 @@ def get_calfire_context(bucket, geo_bbox):
     """
     if not geo_bbox:
         return ""
-    cache_key = "calfire-cache/palisades-" + "_".join(f"{v:.5f}" for v in geo_bbox) + ".json"
+    cache_key = "calfire-cache/" + "_".join(f"{v:.5f}" for v in geo_bbox) + ".json"
     try:
         records = json.loads(s3_client.get_object(Bucket=bucket, Key=cache_key)["Body"].read())
         logger.info("Using cached CAL FIRE data s3://%s/%s", bucket, cache_key)
     except s3_client.exceptions.NoSuchKey:
         params = {
-            "where": "INCIDENTNAME = 'Palisades'",
+            "where": "1=1",  # every inspected structure in the area, whichever fire it was inspected after
             "geometry": ",".join(str(v) for v in geo_bbox),
             "geometryType": "esriGeometryEnvelope",
             "inSR": "4326",
