@@ -36,7 +36,15 @@ s3_client = boto3.client("s3")
 claude = AnthropicBedrock()  # region and credentials come from the Lambda environment
 
 BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
-MAX_TOKENS = 16000  # includes Claude's thinking, so leave plenty of room
+MAX_TOKENS = 16000  # per response, including Claude's thinking
+MAX_TURNS = 8  # cap on Claude <-> tool round trips, so one image can't run up the bill
+# Image tokens grow with pixel area (about 1 token per 28x28 pixels): 1280 px is about 1,600 tokens
+# per image instead of about 3,200 at full size. Raise it if Claude needs finer detail.
+IMAGE_MAX_EDGE = 1280
+
+# Claude Opus 5.5 list prices in USD per million tokens, for the cost estimate in the logs.
+# Check Amazon Bedrock pricing for your region; update these if they differ.
+PRICE_PER_MTOK = {"input": 4.00, "cache_write": 5.00, "cache_read": 0.20, "output": 20.00}
 
 
 # ---------------------------------------------------------------------------
@@ -146,17 +154,35 @@ def call_bedrock(content):
     runner = claude.beta.messages.tool_runner(
         model=BEDROCK_MODEL_ID,
         max_tokens=MAX_TOKENS,
+        max_iterations=MAX_TURNS,
         output_config={"effort": "medium"},
         tools=TOOLS,
         messages=[{"role": "user", "content": content}],
+        # Every tool round trip resends the whole conversation. Automatic caching moves the cache
+        # forward each turn, so the images, prompt and earlier tool results are read from cache
+        # at a small fraction of the normal input price.
+        cache_control={"type": "ephemeral"},
         stream=True,
     )
-    message = runner.until_done()
-    logger.info("Claude responded (stop_reason=%s, usage=%s)", message.stop_reason, message.usage)
+
+    # Each turn is one request; add up the tokens so we can log what the image cost
+    tokens = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+    for turn, stream in enumerate(runner, start=1):
+        message = stream.get_final_message()
+        usage = message.usage
+        tokens["input"] += usage.input_tokens
+        tokens["cache_write"] += usage.cache_creation_input_tokens or 0
+        tokens["cache_read"] += usage.cache_read_input_tokens or 0
+        tokens["output"] += usage.output_tokens
+    cost = sum(tokens[k] * PRICE_PER_MTOK[k] / 1_000_000 for k in tokens)
+    logger.info("Claude finished in %d turn(s), stop_reason=%s, tokens=%s, estimated cost $%.2f",
+                turn, message.stop_reason, tokens, cost)
 
     # Check why Claude stopped before using its answer
     if message.stop_reason == "refusal":
         raise RuntimeError(f"Claude declined the request: {message.stop_details}")
+    if message.stop_reason == "tool_use":
+        raise RuntimeError(f"Claude was still calling tools after {MAX_TURNS} turns; raise MAX_TURNS")
     text = "".join(b.text for b in message.content if b.type == "text").strip()
     if not text:
         raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
@@ -208,9 +234,9 @@ def process_sam3_analysis(bucket, key):
         content.append({"type": "image", "source": {
             "type": "base64",
             "media_type": "image/jpeg",
-            "data": base64.b64encode(to_jpeg(load_s3_binary(uri), max_edge=2000)).decode(),
+            "data": base64.b64encode(to_jpeg(load_s3_binary(uri), max_edge=IMAGE_MAX_EDGE)).decode(),
         }})
-    content.append({"type": "text", "text": f"<Area Metadata>\n{json.dumps(metadata, indent=2)}\n</Area Metadata>"})
+    content.append({"type": "text", "text": f"<Area Metadata>\n{json.dumps(metadata, separators=(",", ":"))}\n</Area Metadata>"})
     if calfire_context:
         content.append({"type": "text", "text": f"<CAL FIRE Construction Data>\n{calfire_context}\n</CAL FIRE Construction Data>"})
     content.append({"type": "text", "text": prompt})
