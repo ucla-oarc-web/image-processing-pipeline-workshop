@@ -3,7 +3,8 @@
 This Lambda is invoked by Step Functions after SageMaker async inference
 completes. It:
   1. Reads the SageMaker output JSON from S3 (contains image URIs)
-  2. Sends the before, after and outlined images and area metadata to Claude on Bedrock
+  2. Sends the before, after and outlined images, area metadata and optional CAL FIRE
+     data to Claude on Bedrock
   3. Generates a styled markdown report with before/after/compared images
   4. Saves the report to S3 (markdown/ prefix)
 
@@ -15,6 +16,9 @@ import base64
 import json
 import logging
 import os
+import urllib.parse
+import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
 
@@ -70,6 +74,59 @@ def to_jpeg(image_bytes, max_edge, quality=85):
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# CAL FIRE damage inspection (DINS) data
+# ---------------------------------------------------------------------------
+
+# Public CAL FIRE DINS feature service (statewide, one record per inspected structure)
+DINS_URL = ("https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/"
+            "POSTFIRE_MASTER_DATA_SHARE/FeatureServer/0/query")
+# Construction details only. DAMAGE is left out on purpose: SAM3 decides what burned.
+DINS_FIELDS = ["STRUCTURETYPE", "YEARBUILT", "ROOFCONSTRUCTION", "EAVES", "VENTSCREEN",
+               "EXTERIORSIDING", "WINDOWPANE", "DECKPORCHELEVATED", "FENCEATTACHEDTOSTRUCTURE"]
+
+
+def get_calfire_context(bucket, geo_bbox):
+    """Summarize how homes inside geo_bbox [min_lon, min_lat, max_lon, max_lat] were built.
+
+    Records are cached in S3 so repeated runs don't hit the CAL FIRE API again.
+    Returns "" when no geo_bbox is given.
+    """
+    if not geo_bbox:
+        return ""
+    cache_key = "calfire-cache/palisades-" + "_".join(f"{v:.5f}" for v in geo_bbox) + ".json"
+    try:
+        records = json.loads(s3_client.get_object(Bucket=bucket, Key=cache_key)["Body"].read())
+        logger.info("Using cached CAL FIRE data s3://%s/%s", bucket, cache_key)
+    except s3_client.exceptions.NoSuchKey:
+        params = {
+            "where": "INCIDENTNAME = 'Palisades'",
+            "geometry": ",".join(str(v) for v in geo_bbox),
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": ",".join(DINS_FIELDS),
+            "returnGeometry": "false",
+            "f": "json",
+        }
+        with urllib.request.urlopen(f"{DINS_URL}?{urllib.parse.urlencode(params)}", timeout=30) as resp:
+            records = [f["attributes"] for f in json.load(resp).get("features", [])]
+        s3_client.put_object(Bucket=bucket, Key=cache_key, Body=json.dumps(records).encode(),
+                             ContentType="application/json")
+        logger.info("Fetched %d CAL FIRE records, cached at s3://%s/%s", len(records), bucket, cache_key)
+
+    if not records:
+        return ""
+    lines = [f"CAL FIRE inspection data: how the {len(records)} structures in this area were built "
+             "(counts per value; burn outcomes are not included):"]
+    for field in DINS_FIELDS:
+        counts = Counter(str(r.get(field) or "Unknown") for r in records)
+        if field == "YEARBUILT":
+            counts = Counter("Unknown" if y == "Unknown" else f"{y[:3]}0s" for y in counts.elements())
+        lines.append(f"- {field}: " + ", ".join(f"{v} ({n})" for v, n in counts.most_common(6)))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +189,9 @@ def process_sam3_analysis(bucket, key):
     with open(os.path.join(os.path.dirname(__file__), "prompt.txt")) as f:
         prompt = f.read()
 
+    original_input = sam3_output.get("input", {})
     metadata = build_area_metadata(sam3_output)
+    calfire_context = get_calfire_context(bucket, original_input.get("geo_bbox"))
 
     # Inputs first, each labeled the way the prompt names it; the prompt goes last
     content = []
@@ -146,6 +205,8 @@ def process_sam3_analysis(bucket, key):
             "data": base64.b64encode(to_jpeg(load_s3_binary(uri), max_edge=2000)).decode(),
         }})
     content.append({"type": "text", "text": f"<Area Metadata>\n{json.dumps(metadata, indent=2)}\n</Area Metadata>"})
+    if calfire_context:
+        content.append({"type": "text", "text": f"<CAL FIRE Construction Data>\n{calfire_context}\n</CAL FIRE Construction Data>"})
     content.append({"type": "text", "text": prompt})
 
     llm_result = call_bedrock(content)
