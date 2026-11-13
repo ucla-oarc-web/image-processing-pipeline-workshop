@@ -197,17 +197,27 @@ def build_area_metadata(sam3_output):
     detection = sam3_output.get("detection", {})
     houses = detection.get("detections", [])
     not_given = "not provided"
+    geo_bbox = original_input.get("geo_bbox")
+    width, height = detection.get("image_width"), detection.get("image_height")
+    if geo_bbox and width and height:
+        # Each home's center as "latitude,longitude", ready to pass to the terrain and wind tools
+        min_lon, min_lat, max_lon, max_lat = geo_bbox
+        for house in houses:
+            x_min, y_min, x_max, y_max = house["bbox"]
+            lat = max_lat - (y_min + y_max) / 2 / height * (max_lat - min_lat)  # image y runs north to south
+            lon = min_lon + (x_min + x_max) / 2 / width * (max_lon - min_lon)
+            house["center"] = f"{lat:.5f},{lon:.5f}"
     return {
         "before_image_capture_date": original_input.get("before_date", not_given),
         "after_image_capture_date": original_input.get("after_date", not_given),
-        "image_size_px": [detection.get("image_width"), detection.get("image_height")],
+        "image_size_px": [width, height],
         "resolution_m_per_px": detection.get("gsd_m") or not_given,
-        "location_bounds": original_input.get("geo_bbox") or not_given,
+        "location_bounds": geo_bbox or not_given,
         "location_bounds_format": "[min_longitude, min_latitude, max_longitude, max_latitude]",
         "labels_from": "SAM3 segmentation (an earlier pipeline step)",
         "homes_burned": sum(h["label"] == "burned" for h in houses),
         "homes_survived": sum(h["label"] == "survived" for h in houses),
-        "homes": houses,  # id, bbox [x_min, y_min, x_max, y_max] in pixels, label
+        "homes": houses,  # id, bbox [x_min, y_min, x_max, y_max] in pixels, label, center (if geo_bbox is given)
     }
 
 
