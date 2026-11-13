@@ -4,7 +4,7 @@ This Lambda is invoked by Step Functions after SageMaker async inference
 completes. It:
   1. Reads the SageMaker output JSON from S3 (contains image URIs)
   2. Sends the before, after and outlined images, area metadata and optional CAL FIRE
-     data to Claude on Bedrock
+     data to Claude on Bedrock, which can call the tools in tools.py
   3. Generates a styled markdown report with before/after/compared images
   4. Saves the report to S3 (markdown/ prefix)
 
@@ -26,6 +26,8 @@ import boto3
 from anthropic import AnthropicBedrock
 from botocore.exceptions import ClientError
 from PIL import Image
+
+from tools import TOOLS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -134,18 +136,22 @@ def get_calfire_context(bucket, geo_bbox):
 # ---------------------------------------------------------------------------
 
 def call_bedrock(content):
-    """Send the labeled inputs to Claude on Bedrock and return its text answer.
+    """Send the labeled inputs to Claude on Bedrock, let it call the tools, and return its text answer.
 
     content: the user message's content blocks (images, metadata, then the prompt).
+    The SDK's tool runner runs the loop: when Claude asks for a tool, the runner calls
+    the matching function in tools.py and sends the result back, until Claude is done.
     """
     # Stream so long thinking doesn't hit HTTP timeouts
-    with claude.messages.stream(
+    runner = claude.beta.messages.tool_runner(
         model=BEDROCK_MODEL_ID,
         max_tokens=MAX_TOKENS,
         output_config={"effort": "medium"},
+        tools=TOOLS,
         messages=[{"role": "user", "content": content}],
-    ) as stream:
-        message = stream.get_final_message()
+        stream=True,
+    )
+    message = runner.until_done()
     logger.info("Claude responded (stop_reason=%s, usage=%s)", message.stop_reason, message.usage)
 
     # Check why Claude stopped before using its answer

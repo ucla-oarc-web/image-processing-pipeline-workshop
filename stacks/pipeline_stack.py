@@ -66,6 +66,11 @@ class PipelineStack(cdk.Stack):
                 f"arn:{self.partition}:bedrock:{self.region}:{self.account}:inference-profile/{bedrock_model_id}",
             ],
         ))
+        # Claude's reference-fire tool uses AgentCore Web Search, an AWS-owned tool (account "aws")
+        processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock-agentcore:InvokeWebSearch"],
+            resources=[f"arn:{self.partition}:bedrock-agentcore:{self.region}:aws:tool/web-search.v1"],
+        ))
 
         # -----------------------------------------------------------
         # Endpoint Monitor Lambda (auto-shutdown for SageMaker)
