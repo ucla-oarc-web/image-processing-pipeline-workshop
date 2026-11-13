@@ -3,7 +3,7 @@
 This Lambda is invoked by Step Functions after SageMaker async inference
 completes. It:
   1. Reads the SageMaker output JSON from S3 (contains image URIs)
-  2. Sends the before, after, and comparison images to Bedrock Claude for analysis
+  2. Sends the before, after and outlined images and area metadata to Claude on Bedrock
   3. Generates a styled markdown report with before/after/compared images
   4. Saves the report to S3 (markdown/ prefix)
 
@@ -76,21 +76,11 @@ def to_jpeg(image_bytes, max_edge, quality=85):
 # Bedrock
 # ---------------------------------------------------------------------------
 
-def call_bedrock(images, prompt):
-    """Send the labeled images plus the prompt to Claude on Bedrock and return its text answer.
+def call_bedrock(content):
+    """Send the labeled inputs to Claude on Bedrock and return its text answer.
 
-    images: list of (label, image_bytes) tuples, sent in order.
+    content: the user message's content blocks (images, metadata, then the prompt).
     """
-    content = []
-    for label, image_bytes in images:
-        content.append({"type": "text", "text": f"Image: {label}"})
-        content.append({"type": "image", "source": {
-            "type": "base64",
-            "media_type": "image/jpeg",
-            "data": base64.b64encode(to_jpeg(image_bytes, max_edge=2000)).decode(),
-        }})
-    content.append({"type": "text", "text": prompt})
-
     # Stream so long thinking doesn't hit HTTP timeouts
     with claude.messages.stream(
         model=BEDROCK_MODEL_ID,
@@ -112,6 +102,26 @@ def call_bedrock(images, prompt):
     return text
 
 
+def build_area_metadata(sam3_output):
+    """Area metadata for Claude: capture dates, resolution, bounds, and SAM3's burned/survived labels."""
+    original_input = sam3_output.get("input", {})
+    detection = sam3_output.get("detection", {})
+    houses = detection.get("detections", [])
+    not_given = "not provided"
+    return {
+        "before_image_capture_date": original_input.get("before_date", not_given),
+        "after_image_capture_date": original_input.get("after_date", not_given),
+        "image_size_px": [detection.get("image_width"), detection.get("image_height")],
+        "resolution_m_per_px": detection.get("gsd_m") or not_given,
+        "location_bounds": original_input.get("geo_bbox") or not_given,
+        "location_bounds_format": "[min_longitude, min_latitude, max_longitude, max_latitude]",
+        "labels_from": "SAM3 segmentation (an earlier pipeline step)",
+        "homes_burned": sum(h["label"] == "burned" for h in houses),
+        "homes_survived": sum(h["label"] == "survived" for h in houses),
+        "homes": houses,  # id, bbox [x_min, y_min, x_max, y_max] in pixels, label
+    }
+
+
 # ---------------------------------------------------------------------------
 # Report generation
 # ---------------------------------------------------------------------------
@@ -122,13 +132,23 @@ def process_sam3_analysis(bucket, key):
     with open(os.path.join(os.path.dirname(__file__), "prompt.txt")) as f:
         prompt = f.read()
 
-    images = [
-        ("1) before the fire", load_s3_binary(sam3_output["before"])),
-        ("2) after the fire", load_s3_binary(sam3_output["after"])),
-        ("3) before-fire photo, burned homes outlined in red, surviving homes in green",
-         load_s3_binary(sam3_output["compare"])),
-    ]
-    llm_result = call_bedrock(images, prompt)
+    metadata = build_area_metadata(sam3_output)
+
+    # Inputs first, each labeled the way the prompt names it; the prompt goes last
+    content = []
+    for label, uri in [("Before Image", sam3_output["before"]),
+                       ("After Image", sam3_output["after"]),
+                       ("Outlined Image", sam3_output["compare"])]:
+        content.append({"type": "text", "text": f"<{label}>"})
+        content.append({"type": "image", "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.b64encode(to_jpeg(load_s3_binary(uri), max_edge=2000)).decode(),
+        }})
+    content.append({"type": "text", "text": f"<Area Metadata>\n{json.dumps(metadata, indent=2)}\n</Area Metadata>"})
+    content.append({"type": "text", "text": prompt})
+
+    llm_result = call_bedrock(content)
 
     # Extract descriptive name from before image filename (e.g., "1-before.png" -> "1")
     before_image = sam3_output.get("before", "")
